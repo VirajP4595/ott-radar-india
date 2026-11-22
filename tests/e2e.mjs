@@ -49,6 +49,10 @@ const MOVIES = {
   105: { title: 'Baarish Ke Baad', lang: 'hi', dates: [[addDays(T, -1), '']], prov: [232] },
   106: { title: 'Next Month Film', lang: 'ml', dates: [[nextMonth15, '']], prov: [2336] },
   301: { title: 'Kaaval', lang: 'ta', dates: [], prov: [] },
+  107: { title: 'Drishyam Test', lang: 'hi', dates: [[T, '']], prov: [], runtime: 148, pop: 8 },
+  108: { title: 'Global Original', lang: 'en', dates: [], other: [[T, 'BR', 'Netflix'], [T, 'US', 'Netflix']], prov: [8] },
+  109: { title: 'Tiny Short', lang: 'en', dates: [[T, '']], prov: [], runtime: 5, pop: 0.1 },
+  110: { title: 'Old Classic', lang: 'en', dates: [], other: [[T, 'PH', 'Netflix']], prov: [8], released: '1999-01-01' },
 };
 const SHOWS = {
   201: { name: 'Second Shift', lang: 'hi', prov: [2336], season: 2, eps: [[2, 1, T], [2, 2, addDays(T, 7)]] },
@@ -68,7 +72,8 @@ function tmdb(url, headers) {
   if (p === '/discover/movie') {
     const from = url.searchParams.get('release_date.gte');
     const to = url.searchParams.get('release_date.lte');
-    const ids = Object.entries(MOVIES).filter(([, mv]) => mv.dates.some(([d]) => d >= from && d <= to)).map(([id]) => ({ id: Number(id) }));
+    const global = url.searchParams.has('watch_region');
+    const ids = Object.entries(MOVIES).filter(([, mv]) => (global ? [...mv.dates, ...(mv.other || [])] : mv.dates).some(([d]) => d >= from && d <= to)).map(([id]) => ({ id: Number(id) }));
     return [200, { page: 1, total_pages: 1, results: ids }];
   }
   if (p === '/discover/tv') {
@@ -82,11 +87,13 @@ function tmdb(url, headers) {
     if (!mv) return [404, {}];
     const rd = mv.dates.map(([d, note]) => ({ type: 4, release_date: `${d}T00:00:00.000Z`, note, certification: 'U/A 16+' }));
     if (mv.theatrical) rd.push({ type: 3, release_date: `${mv.theatrical}T00:00:00.000Z`, note: '', certification: 'U/A 16+' });
+    const others = {};
+    for (const [d, cc, note] of mv.other || []) (others[cc] ||= []).push({ type: 4, release_date: `${d}T00:00:00.000Z`, note });
     return [200, {
       id: Number(m[1]), title: mv.title, original_language: mv.lang, poster_path: `/poster${m[1]}.jpg`, backdrop_path: `/bd${m[1]}.jpg`,
-      runtime: 132, genres: [{ name: 'Thriller' }, { name: 'Drama' }], overview: `${mv.title} overview text.`, release_date: '2026-10-10',
+      runtime: mv.runtime ?? 132, popularity: mv.pop ?? 5, vote_count: 10, genres: [{ name: 'Thriller' }, { name: 'Drama' }], overview: `${mv.title} overview text.`, release_date: mv.released || '2026-10-10',
       spoken_languages: [{ english_name: 'Hindi' }, { english_name: 'Tamil' }],
-      release_dates: { results: [{ iso_3166_1: 'IN', release_dates: rd }] },
+      release_dates: { results: [{ iso_3166_1: 'IN', release_dates: rd }, ...Object.entries(others).map(([cc, r]) => ({ iso_3166_1: cc, release_dates: r }))] },
       'watch/providers': provList(mv.prov),
       credits: { cast: [{ name: 'Actor One', character: 'Lead', profile_path: '/p1.jpg' }, { name: 'Actor Two', character: 'Support', profile_path: null }] },
     }];
@@ -216,6 +223,12 @@ async function main() {
     check(day.includes('Godavari Nights'), 'tomorrow section uses the platform named in the TMDB release note');
     check(await page.locator('img.plogo').count() > 0, 'official provider logos are shown from TMDB');
     await shot('02-day');
+
+    console.log('Coverage beyond India digital dates');
+    check(day.includes('Drishyam Test') && day.includes('Platform TBA'), 'India date with no service listed shows as "Platform TBA" instead of being dropped');
+    check(day.includes('Global Original') && day.includes('Likely date'), 'worldwide original with no India date uses the matching-service date from another country ("Likely date")');
+    check(!day.includes('Tiny Short'), 'short films / test entries are not shown as Platform TBA');
+    check(!day.includes('Old Classic'), "an old film added in just one other country isn't treated as a new India release");
 
     console.log('Quick platform chip');
     await page.click('.mobile-only button[data-key=netflix]');

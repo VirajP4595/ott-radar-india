@@ -133,15 +133,20 @@ function syncWatchlist(list) {
 
 // ---------------------------------------------------------------- small UI pieces
 const isToday = (d) => d === D.today();
+let regionNames = null;
+try { regionNames = new Intl.DisplayNames(['en'], { type: 'region' }); } catch { /* old browser */ }
+const countryName = (cc) => { try { return (regionNames && regionNames.of(cc)) || cc; } catch { return cc; } };
 
 function pLogo(key) {
+  if (key === 'unknown') return '<span class="pdot p-unknown"></span>';
   const logo = state.providers?.logos?.[key] || state.publicLogos?.[key];
   return logo
     ? `<img class="plogo" src="${img(logo, 'w92')}" alt="" width="20" height="20" loading="lazy">`
     : `<span class="pdot p-${esc(key)}"></span>`;
 }
+const pName = (key) => (key === 'unknown' ? 'Platform TBA' : platformByKey(key)?.name || key);
 function pTag(key) {
-  return `<span class="ptag">${pLogo(key)}${esc(platformByKey(key)?.name || key)}</span>`;
+  return `<span class="ptag">${pLogo(key)}${esc(pName(key))}</span>`;
 }
 function kindText(r) {
   if (r.mediaType === 'movie') return 'Movie';
@@ -157,6 +162,7 @@ function metaText(r) {
 }
 function statusTag(r) {
   if (r.conflict) return `<span class="status bad" title="TMDB says ${esc(D.fmtDate(r.conflict))}">Dates disagree</span>`;
+  if (r.status === 'Likely') return '<span class="status warn" title="No India date on TMDB; date taken from another country where the same service released it">Likely date</span>';
   return `<span class="status ${r.status === 'Confirmed' ? 'ok' : 'warn'}">${esc(r.status)}</span>`;
 }
 function posterBox(r, size) {
@@ -180,7 +186,7 @@ function cardLg(r) {
     <div class="card-tags">${r.platforms.map(pTag).join('')}${kindBadge(r)}${statusTag(r)}</div></div></a>`;
 }
 function cardSm(r) {
-  const name = platformByKey(r.platforms[0])?.name || '';
+  const name = pName(r.platforms[0]);
   return `<a class="row ${state.watchKeys.has(r.key) ? 'is-mine' : ''}" href="${titleHref(r)}">${posterBox(r, 'w92')}
     <div class="row-body"><span class="row-title">${wmark(r)}${esc(r.title)}</span><span class="row-meta">${esc(metaText(r))}</span></div>
     <span class="row-plat">${pLogo(r.platforms[0])}<span class="row-pname">${esc(name)}</span></span></a>`;
@@ -188,7 +194,7 @@ function cardSm(r) {
 function tile(r) {
   const sub = r.mediaType === 'movie' ? 'Movie' : (r.label || 'Series');
   return `<a class="tile ${state.watchKeys.has(r.key) ? 'is-mine' : ''}" href="${titleHref(r)}">
-    <div class="tile-art">${posterBox(r, 'w342')}<span class="tile-badges">${kindBadge(r)}${r.status === 'Expected' || r.conflict ? statusTag(r) : ''}</span>${wmark(r)}</div>
+    <div class="tile-art">${posterBox(r, 'w342')}<span class="tile-badges">${kindBadge(r)}${r.status !== 'Confirmed' || r.conflict ? statusTag(r) : ''}</span>${wmark(r)}</div>
     <span class="tile-title">${esc(r.title)}</span>
     <span class="tile-meta">${pLogo(r.platforms[0])}<span>${esc(sub)}</span></span></a>`;
 }
@@ -317,8 +323,10 @@ function filterPanel() {
   }).join('')}</div>
       <p class="hint">${myLanguages().length ? `Showing your ${myLanguages().length} languages. <a href="#/settings">Change them in Settings</a>.` : 'Matches original, spoken or dubbed languages TMDB knows about.'}</p></section>
     <section class="fsec switches">
-      <label class="switch"><span><strong>Confirmed dates only</strong><small>Hide "Expected" dates from manual entries</small></span>
+      <label class="switch"><span><strong>Confirmed dates only</strong><small>Hide "Expected" and "Likely" dates</small></span>
         <input type="checkbox" data-action="toggle-confirmed" ${f.confirmedOnly ? 'checked' : ''}></label>
+      <label class="switch"><span><strong>Include "Platform TBA"</strong><small>Releases with an India date whose service isn't on TMDB yet</small></span>
+        <input type="checkbox" data-action="toggle-unknown" ${f.showUnknown !== false ? 'checked' : ''}></label>
       <label class="switch"><span><strong>Every new episode</strong><small>Off shows only new series, premieres and finales in "All"</small></span>
         <input type="checkbox" data-action="toggle-episodes" ${f.episodes ? 'checked' : ''}></label>
     </section>`;
@@ -523,7 +531,7 @@ async function renderTitle(type, id) {
   const gap = type === 'movie' && t.theatrical && date && D.daysBetween(t.theatrical, date) > 0
     ? `<span class="muted small">In theatres ${esc(D.fmtDate(t.theatrical))} · came to OTT ${D.daysBetween(t.theatrical, date)} days later</span>` : '';
   const source = rel
-    ? `<span class="muted small">Date source: ${rel.source === 'Manual' ? 'manual entry' : 'TMDB'}${rel.sourceUrl ? ` · <a href="${esc(rel.sourceUrl)}" target="_blank" rel="noopener noreferrer">source</a>` : ''}${rel.conflict ? ` · TMDB says ${esc(D.fmtDate(rel.conflict))}` : ''}</span>` : '';
+    ? `<span class="muted small">Date source: ${rel.source === 'Manual' ? 'manual entry' : rel.dateFrom ? `TMDB, from the ${esc(countryName(rel.dateFrom))} listing (no India date yet)` : 'TMDB'}${rel.sourceUrl ? ` · <a href="${esc(rel.sourceUrl)}" target="_blank" rel="noopener noreferrer">source</a>` : ''}${rel.conflict ? ` · TMDB says ${esc(D.fmtDate(rel.conflict))}` : ''}</span>` : '';
   const backdrop = img(t.backdrop, 'w780');
 
   const body = `<article class="detail">
@@ -959,6 +967,7 @@ const actions = {
     toast('Calendar file downloaded');
   },
   'toggle-confirmed': (el) => updateFilters((f) => ({ ...f, confirmedOnly: el.checked })),
+  'toggle-unknown': (el) => updateFilters((f) => ({ ...f, showUnknown: el.checked })),
   'toggle-episodes': (el) => updateFilters((f) => ({ ...f, episodes: el.checked })),
   'reset-filters': () => updateFilters(() => ({ ...S.DEFAULT_FILTERS })),
   retry: () => { resetData(); rerender(); },

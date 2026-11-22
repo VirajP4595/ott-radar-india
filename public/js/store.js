@@ -35,7 +35,7 @@ export const setLastFetch = (t) => write('lastFetch', t);
 // ---- Filters
 export const KINDS = ['all', 'premieres', 'movies', 'finales'];
 export const DEFAULT_FILTERS = Object.freeze({
-  platforms: [], languages: [], kind: 'all', mine: false, episodes: false, confirmedOnly: false,
+  platforms: [], languages: [], kind: 'all', mine: false, episodes: false, confirmedOnly: false, showUnknown: true,
 });
 export function getFilters() {
   const f = { ...DEFAULT_FILTERS, ...read('filters', {}) };

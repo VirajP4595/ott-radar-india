@@ -401,3 +401,4 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(-
 .pill.check { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
 .pill.check input { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
 .pill.check:has(input:checked) { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
+.p-unknown { background: #6B7480; }

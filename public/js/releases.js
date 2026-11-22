@@ -45,7 +45,7 @@ async function discoverIds(tmdb, path, params, maxPages) {
 
 // ---------- Movies
 async function movieInfo(tmdb, id) {
-  const ck = `m2:${id}`;
+  const ck = `m3:${id}`;
   const c = cacheGet(ck);
   if (c) return c;
   const d = await tmdb.get(`/movie/${id}`, { append_to_response: 'watch/providers,release_dates' });
@@ -58,27 +58,77 @@ async function movieInfo(tmdb, id) {
     poster: d.poster_path || '',
     runtime: d.runtime || 0,
     genres: (d.genres || []).map((g) => g.name).slice(0, 3),
+    released: String(d.release_date || '').slice(0, 10),
+    pop: d.popularity || 0,
+    votes: d.vote_count || 0,
     digital: (inRel?.release_dates || [])
       .filter((r) => r.type === 4)
       .map((r) => ({ date: String(r.release_date || '').slice(0, 10), note: r.note || '' })),
+    // Digital dates in other countries whose note names a service (e.g. Brazil: "Netflix").
+    // Used only when India has no digital date at all.
+    otherDigital: (d.release_dates?.results || [])
+      .filter((c) => c.iso_3166_1 !== 'IN')
+      .flatMap((c) => (c.release_dates || [])
+        .filter((r) => r.type === 4 && keysInText(r.note || '').length)
+        .map((r) => ({ date: String(r.release_date || '').slice(0, 10), cc: c.iso_3166_1, note: r.note })))
+      .slice(0, 40),
     wp: pickIN(d['watch/providers']),
   };
   cacheSet(ck, v, 24 * H);
   return v;
 }
 
+const byDate = (a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
+
 async function movieRelease(tmdb, map, id, from, to) {
   const m = await movieInfo(tmdb, id);
-  const hit = m.digital.filter((x) => x.date >= from && x.date <= to).sort((a, b) => (a.date < b.date ? -1 : 1))[0];
-  if (!hit) return null;
-  const platforms = [...new Set([...providerKeys(m.wp, map), ...keysInText(hit.note)])];
-  if (!platforms.length) return null; // not on a platform we track
-  return {
-    id: `movie:${m.id}:${hit.date}`, key: `movie:${m.id}`, mediaType: 'movie', tmdbId: m.id,
-    title: m.title, lang: m.lang, langs: uniq([m.lang, ...(m.langs || []), ...langsInText(hit.note)]),
-    date: hit.date, platforms, kind: 'movie', label: '',
-    poster: m.poster, runtime: m.runtime, genres: m.genres, status: 'Confirmed', source: 'TMDB',
-  };
+  const inKeys = providerKeys(m.wp, map);
+  const make = (date, platforms, status, extra = {}) => ({
+    id: `movie:${m.id}:${date}`, key: `movie:${m.id}`, mediaType: 'movie', tmdbId: m.id,
+    title: m.title, lang: m.lang, langs: uniq([m.lang, ...(m.langs || []), ...(extra.noteLangs || [])]),
+    date, platforms, kind: 'movie', label: '',
+    poster: m.poster, runtime: m.runtime, genres: m.genres, status, source: 'TMDB', dateFrom: extra.dateFrom || '',
+  });
+
+  // 1) India digital date: the authoritative case.
+  const hit = m.digital.filter((x) => x.date >= from && x.date <= to).sort(byDate)[0];
+  if (hit) {
+    const platforms = uniq([...inKeys, ...keysInText(hit.note)]);
+    if (platforms.length) return make(hit.date, platforms, 'Confirmed', { noteLangs: langsInText(hit.note) });
+    // No service named anywhere and none listed for India: show it as "Platform TBA" rather than
+    // dropping it, but only for real feature films (TMDB also lists shorts and test entries).
+    // If India lists only services we don't track, it really isn't ours.
+    const feature = (m.runtime >= 60 || (!m.runtime && m.pop >= 0.8)) && m.pop >= 0.4;
+    if (!(m.wp.p || []).length && m.poster && feature) return make(hit.date, ['unknown'], 'Confirmed', { noteLangs: langsInText(hit.note) });
+    return null;
+  }
+  if (m.digital.length) return null; // India has a digital date, just not in this range
+
+  // 2) No India digital date at all: borrow another country's date, but only when that
+  //    country's note names a service the title is on in India (worldwide originals, or an
+  //    older film arriving on that service). Shown as "Likely date".
+  //    Films over a year old must show the same service + date in at least 3 countries, so a
+  //    single country's catalogue change (e.g. an old film added to Netflix Philippines) doesn't count.
+  if (!inKeys.length) return null;
+  const old = !m.released || m.released < D.addDays(from, -365);
+  const groups = new Map(); // "date|service" -> countries
+  for (const x of m.otherDigital || []) {
+    if (x.date < from || x.date > to) continue;
+    for (const k of keysInText(x.note)) {
+      if (!inKeys.includes(k)) continue;
+      const g = `${x.date}|${k}`;
+      if (!groups.has(g)) groups.set(g, new Set());
+      groups.get(g).add(x.cc);
+    }
+  }
+  const ok = [...groups.entries()]
+    .filter(([, ccs]) => ccs.size >= (old ? 3 : 1))
+    .map(([g, ccs]) => ({ date: g.split('|')[0], key: g.split('|')[1], cc: [...ccs][0], n: ccs.size }))
+    .sort((a, b) => byDate(a, b) || b.n - a.n);
+  if (!ok.length) return null;
+  const date = ok[0].date;
+  const platforms = uniq(ok.filter((x) => x.date === date).map((x) => x.key));
+  return make(date, platforms, 'Likely', { dateFrom: ok[0].cc });
 }
 
 // ---------- Series
@@ -152,18 +202,28 @@ async function tvReleases(tmdb, map, id, from, to) {
 
 /** All TMDB releases in India for month "YYYY-MM" on tracked platforms. Cached on the device. */
 export async function loadMonth(tmdb, map, mk, onProgress) {
-  const ck = `rel3:${mk}`;
+  const ck = `rel5:${mk}`;
   const c = cacheGet(ck);
   if (c) return c;
   const from = D.monthStart(mk);
   const to = D.monthEnd(mk);
   const providerIds = idsForKeys(map, PLATFORMS.map((p) => p.key));
 
-  const [movieIds, tvIds] = await Promise.all([
+  const [inMovieIds, globalMovieIds, tvIds] = await Promise.all([
+    // Movies with an India digital release in the month.
     discoverIds(tmdb, '/discover/movie', {
       region: 'IN', with_release_type: 4, 'release_date.gte': from, 'release_date.lte': to,
       sort_by: 'popularity.desc', include_adult: false,
     }, MAX_MOVIE_PAGES),
+    // Movies streaming in India on tracked services with a digital release anywhere that month
+    // (catches worldwide originals that have no India date on TMDB).
+    providerIds.length
+      ? discoverIds(tmdb, '/discover/movie', {
+        watch_region: 'IN', with_watch_providers: providerIds.join('|'),
+        with_watch_monetization_types: 'flatrate|free|ads', with_release_type: 4,
+        'release_date.gte': from, 'release_date.lte': to, sort_by: 'popularity.desc', include_adult: false,
+      }, MAX_MOVIE_PAGES)
+      : [],
     providerIds.length
       ? discoverIds(tmdb, '/discover/tv', {
         watch_region: 'IN', with_watch_providers: providerIds.join('|'),
@@ -172,6 +232,7 @@ export async function loadMonth(tmdb, map, mk, onProgress) {
       }, MAX_TV_PAGES)
       : [],
   ]);
+  const movieIds = uniq([...inMovieIds, ...globalMovieIds]);
 
   const total = movieIds.length + tvIds.length;
   let done = 0;
@@ -263,6 +324,7 @@ export function mergeReleases(tmdbList, manual) {
  * kind: all | premieres (new series + season premieres) | movies | finales.
  * mine: only titles in the watchlist (their ordinary episodes included).
  * myPlatforms / myLanguages: the user's choices from Settings; anything else is never shown.
+ * Titles whose platform is unknown ("Platform TBA") pass the services choice unless f.showUnknown is false.
  * In "all", ordinary episodes are hidden unless f.episodes is on; finales always show.
  */
 export function applyFilters(list, f, watchKeys = new Set(), myPlatforms = [], myLanguages = []) {
@@ -270,7 +332,9 @@ export function applyFilters(list, f, watchKeys = new Set(), myPlatforms = [], m
     // A title matches a language if it is in ANY of its known languages
     // (original, spoken, named in the India release note, or ticked on a manual entry).
     const langs = r.langs && r.langs.length ? r.langs : [r.lang];
-    if (myPlatforms.length && !r.platforms.some((p) => myPlatforms.includes(p))) return false;
+    const unknown = r.platforms.includes('unknown');
+    if (unknown && f.showUnknown === false) return false;
+    if (myPlatforms.length && !unknown && !r.platforms.some((p) => myPlatforms.includes(p))) return false;
     if (myLanguages.length && !langs.some((l) => myLanguages.includes(l))) return false;
     if (f.mine && !watchKeys.has(r.key)) return false;
     if (f.platforms.length && !r.platforms.some((p) => f.platforms.includes(p))) return false;
