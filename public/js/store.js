@@ -50,6 +50,13 @@ export const setFilters = (f) => write('filters', f);
 export const filtersActive = (f = getFilters()) =>
   f.platforms.length > 0 || f.languages.length > 0 || f.episodes || f.confirmedOnly;
 
+// ---- My streaming services (empty = show every platform)
+export const getMyPlatforms = () => {
+  const v = read('myPlatforms', []);
+  return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+};
+export const setMyPlatforms = (v) => write('myPlatforms', v);
+
 // ---- Layout: "list" or "posters"
 export const getLayout = () => (read('layout', 'list') === 'posters' ? 'posters' : 'list');
 export const setLayout = (v) => write('layout', v === 'posters' ? 'posters' : 'list');

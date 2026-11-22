@@ -255,10 +255,12 @@ export function mergeReleases(tmdbList, manual) {
 /**
  * kind: all | premieres (new series + season premieres) | movies | finales.
  * mine: only titles in the watchlist (their ordinary episodes included).
+ * myPlatforms: the user's chosen services from Settings; others are never shown.
  * In "all", ordinary episodes are hidden unless f.episodes is on; finales always show.
  */
-export function applyFilters(list, f, watchKeys = new Set()) {
+export function applyFilters(list, f, watchKeys = new Set(), myPlatforms = []) {
   return list.filter((r) => {
+    if (myPlatforms.length && !r.platforms.some((p) => myPlatforms.includes(p))) return false;
     if (f.mine && !watchKeys.has(r.key)) return false;
     if (f.platforms.length && !r.platforms.some((p) => f.platforms.includes(p))) return false;
     if (f.languages.length && !f.languages.includes(r.lang)) return false;

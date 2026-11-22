@@ -244,6 +244,23 @@ async function main() {
     await page.click('button[data-action=set-layout][data-key=list]');
     check(await page.locator('a.card').count() >= 4, 'list layout restores cards');
 
+    console.log('My streaming services (Settings)');
+    await page.goto(`${BASE}/#/settings`);
+    await page.click('button[data-action=toggle-my][data-key=netflix]');
+    await page.click('button[data-action=toggle-my][data-key=prime]');
+    check((await page.locator('#my-services').innerText()).includes('2 of 12 selected'), 'Settings shows 2 services selected');
+    await page.goto(`${BASE}/#/day/${T}`);
+    await page.locator('a.card').first().waitFor();
+    today = await page.locator('.sec').first().innerText();
+    check(today.includes('Monsoon Ledger') && today.includes('Neelam') && today.includes('Last Dance'), 'releases on chosen services are shown');
+    check(!today.includes('Second Shift'), 'releases on other services are hidden everywhere');
+    check(await page.locator('.mobile-only button[data-action=toggle-platform]').count() === 2, 'platform chips list only the chosen services');
+    await page.goto(`${BASE}/#/settings`);
+    await page.click('button[data-action=my-clear]');
+    await page.goto(`${BASE}/#/day/${T}`);
+    await page.getByText('Second Shift').first().waitFor();
+    check(true, '"Show all services again" restores everything');
+
     console.log('Week + month');
     await page.goto(`${BASE}/#/week/${T}`);
     await page.locator('.week-groups').waitFor();

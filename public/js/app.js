@@ -235,12 +235,21 @@ function rangeTabs(view, anchor) {
     `<a role="tab" aria-selected="${v === view}" class="${v === view ? 'on' : ''}" href="#/${v}/${anchor}">${v[0].toUpperCase() + v.slice(1)}</a>`).join('')}</div>`;
 }
 
+function myPlatforms() {
+  const keys = new Set(PLATFORMS.map((p) => p.key));
+  return S.getMyPlatforms().filter((k) => keys.has(k));
+}
+function visiblePlatforms() {
+  const my = myPlatforms();
+  return my.length ? PLATFORMS.filter((p) => my.includes(p.key)) : PLATFORMS;
+}
+
 function platformChips() {
   const f = S.getFilters();
   const all = !f.platforms.length;
   return `<div class="chips" role="group" aria-label="Platforms">
-    <button class="chip ${all ? 'on' : ''}" data-action="chip-all" aria-pressed="${all}">All platforms</button>
-    ${PLATFORMS.map((p) => {
+    <button class="chip ${all ? 'on' : ''}" data-action="chip-all" aria-pressed="${all}">${myPlatforms().length ? 'All my services' : 'All platforms'}</button>
+    ${visiblePlatforms().map((p) => {
     const on = f.platforms.includes(p.key);
     return `<button class="chip ${on ? 'on' : ''}" data-action="toggle-platform" data-key="${p.key}" aria-pressed="${on}">${pLogo(p.key)}${esc(p.name)}</button>`;
   }).join('')}</div>`;
@@ -248,12 +257,13 @@ function platformChips() {
 
 function filterPanel() {
   const f = S.getFilters();
+  const mineSet = myPlatforms().length;
   return `<section class="fsec"><h2 class="label">Platforms</h2>
-      <div class="pgrid">${PLATFORMS.map((p) => {
+      <div class="pgrid">${visiblePlatforms().map((p) => {
     const on = f.platforms.includes(p.key);
     return `<button class="pbtn ${on ? 'on' : ''}" data-action="toggle-platform" data-key="${p.key}" aria-pressed="${on}">${pLogo(p.key)}<span class="pname">${esc(p.name)}</span><span class="tick">${on ? '✓' : ''}</span></button>`;
   }).join('')}</div>
-      <p class="hint">None selected shows every platform.</p></section>
+      <p class="hint">${mineSet ? `Showing your ${mineSet} services. <a href="#/settings">Change them in Settings</a>.` : 'None selected shows every platform. <a href="#/settings">Pick your services</a> to hide the rest everywhere.'}</p></section>
     <section class="fsec"><h2 class="label">Original language</h2>
       <div class="wrap">${FILTER_LANGS.map((l) => {
     const on = f.languages.includes(l);
@@ -282,7 +292,7 @@ async function renderRange(view, param) {
   const draw = () => {
     const data = collect(months, from, to);
     state.watchKeys = new Set(S.getWatchlist().map((i) => i.key));
-    const list = data && applyFilters(data, S.getFilters(), state.watchKeys);
+    const list = data && applyFilters(data, S.getFilters(), state.watchKeys, myPlatforms());
     const body = view === 'day' ? dayBody(anchor, list) : view === 'week' ? weekBody(anchor, from, list) : monthBody(anchor, list);
     render(page({ nav: 'releases', subtitle: `India · ${D.fmtLong(D.today())}`, body, sidebar: filterPanel(), connect: true }));
     const bar = document.getElementById('progress-bar');
@@ -517,7 +527,7 @@ function countForBack(back) {
   if (view === 'week') { from = D.weekStart(anchor); to = D.addDays(from, 6); }
   if (view === 'month') { from = D.monthStart(D.monthKey(anchor)); to = D.monthEnd(D.monthKey(anchor)); }
   const data = collect(D.monthsBetween(from, to), from, to);
-  return data ? applyFilters(data, S.getFilters(), new Set(S.getWatchlist().map((i) => i.key))).length : null;
+  return data ? applyFilters(data, S.getFilters(), new Set(S.getWatchlist().map((i) => i.key)), myPlatforms()).length : null;
 }
 
 // ---------------------------------------------------------------- watchlist
@@ -591,6 +601,12 @@ async function checkReminders() {
 
 // ---------------------------------------------------------------- settings
 function renderSettings() {
+  const my = myPlatforms();
+  if (state.tmdb && !state.providers && !state.authError && !state.loadingLogos) {
+    // Load the official logos for the service picker, then redraw.
+    state.loadingLogos = true;
+    ensureProviders().then(() => { if (location.hash.startsWith('#/settings')) rerender(); }).catch(() => {}).finally(() => { state.loadingLogos = false; });
+  }
   const tok = S.getToken();
   const admin = S.getAdminToken();
   const editing = state.editToken || !tok;
@@ -622,8 +638,17 @@ function renderSettings() {
       ${editing ? form : connected}
       <div class="note">${icon.lock}<span class="small">Your token is saved only in this browser and sent only to api.themoviedb.org. OTT Radar's server never sees it. Clearing your browser data removes it.</span></div>
     </section>
+    <section class="panel" id="my-services">
+      <div class="panel-head"><h2>My streaming services</h2><span class="muted small">${my.length ? `${my.length} of ${PLATFORMS.length} selected` : 'All services shown'}</span></div>
+      <p class="small muted">Only releases on the services you tick appear anywhere in OTT Radar. Leave everything unticked to see all of them.</p>
+      <div class="pgrid">${PLATFORMS.map((p) => {
+    const on = my.includes(p.key);
+    return `<button class="pbtn ${on ? 'on' : ''}" data-action="toggle-my" data-key="${p.key}" aria-pressed="${on}">${pLogo(p.key)}<span class="pname">${esc(p.name)}</span><span class="tick">${on ? '✓' : ''}</span></button>`;
+  }).join('')}</div>
+      ${my.length ? '<button class="btn btn-ghost small" data-action="my-clear">Show all services again</button>' : ''}
+    </section>
     <section class="panel links">
-      <a href="#/filters?back=%23%2F">My platforms and languages <span class="muted">›</span></a>
+      <a href="#/filters?back=%23%2F">Filters and languages <span class="muted">›</span></a>
       <a href="#/watchlist">Watchlist and reminders <span class="muted">›</span></a>
       <button class="linkrow" data-action="clear-cache">Refresh all data from TMDB <span class="muted">›</span></button>
     </section>
@@ -829,6 +854,17 @@ const actions = {
   'toggle-platform': (el) => updateFilters((f) => ({ ...f, platforms: toggle(f.platforms, el.dataset.key) })),
   'chip-all': () => updateFilters((f) => ({ ...f, platforms: [] })),
   'toggle-lang': (el) => updateFilters((f) => ({ ...f, languages: toggle(f.languages, el.dataset.key) })),
+  'toggle-my': (el) => {
+    const next = toggle(myPlatforms(), el.dataset.key);
+    S.setMyPlatforms(next);
+    // Drop quick-filter selections that are no longer visible.
+    if (next.length) {
+      const f = S.getFilters();
+      S.setFilters({ ...f, platforms: f.platforms.filter((k) => next.includes(k)) });
+    }
+    rerender();
+  },
+  'my-clear': () => { S.setMyPlatforms([]); toast('Showing all services'); rerender(); },
   'set-kind': (el) => updateFilters((f) => ({ ...f, kind: el.dataset.key })),
   'toggle-mine': () => updateFilters((f) => ({ ...f, mine: !f.mine })),
   'set-layout': (el) => { S.setLayout(el.dataset.key); rerender(); },
