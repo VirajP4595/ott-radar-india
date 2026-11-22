@@ -1,4 +1,4 @@
-// End-to-end test: runs the real Pages Functions + local D1 through `wrangler pages dev`,
+// End-to-end test: runs the real Worker + static assets + local D1 through `wrangler dev`,
 // and replaces TMDB with a mock (so no TMDB token or network is needed).
 // Usage: npm test      (needs `npm install` and Playwright available)
 import { spawn, execSync } from 'node:child_process';
@@ -128,13 +128,13 @@ async function waitForServer() {
     try { const r = await fetch(`${BASE}/`); if (r.ok) return; } catch { /* not up */ }
     await new Promise((r) => setTimeout(r, 1000));
   }
-  throw new Error('wrangler pages dev did not start');
+  throw new Error('wrangler dev did not start');
 }
 
 async function main() {
   execSync('npx wrangler d1 execute ott-radar-india --local --file schema.sql', { cwd: ROOT, stdio: 'ignore' });
   execSync('npx wrangler d1 execute ott-radar-india --local --command "DELETE FROM manual"', { cwd: ROOT, stdio: 'ignore' });
-  const server = spawn('npx', ['wrangler', 'pages', 'dev', 'public', '--port', String(PORT), '--binding', `ADMIN_TOKEN=${ADMIN}`], { cwd: ROOT, stdio: 'ignore', detached: true });
+  const server = spawn('npx', ['wrangler', 'dev', '--port', String(PORT), '--var', `ADMIN_TOKEN:${ADMIN}`], { cwd: ROOT, stdio: 'ignore', detached: true });
   const stop = () => { try { process.kill(-server.pid); } catch { /* gone */ } };
   process.on('exit', stop);
   try {

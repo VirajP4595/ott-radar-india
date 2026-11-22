@@ -2,7 +2,7 @@
 
 An installable web app that shows what's new on Indian streaming platforms (Netflix, Prime Video,
 JioHotstar, ZEE5, SonyLIV, Aha, Sun NXT, Apple TV+, MX Player, Hoichoi, ManoramaMAX, ETV Win)
-by **day, week and month**. It runs on Cloudflare Pages' free tier.
+by **day, week and month**. It runs on Cloudflare Workers' free tier.
 
 - **Bring your own TMDB token.** Each visitor pastes their own free TMDB token in Settings. It is
   stored only in their browser and sent only to `api.themoviedb.org`. The server never sees it.
@@ -17,7 +17,7 @@ by **day, week and month**. It runs on Cloudflare Pages' free tier.
 
 ```
 Browser + user's TMDB token ──► api.themoviedb.org   (discover by region IN, providers, dates)
-Browser ──► /api/manual  (Cloudflare Pages Function) ──► D1  (owner's manual entries only)
+Browser ──► /api/manual  (Cloudflare Worker) ──► D1  (owner's manual entries only)
 ```
 
 For each month the app asks TMDB for:
@@ -41,33 +41,33 @@ For each month the app asks TMDB for:
   notifications only work after **Add to Home Screen**.
 - Only languages are filtered by *original* language. TMDB has no reliable dub data.
 
-## Deploy to Cloudflare
+## Deploy to Cloudflare (Workers)
 
-You need Node 18+ and a free Cloudflare account.
+The app is a Cloudflare **Worker** with static assets: `public/` is served as the site and
+`src/worker.js` handles `/api/manual`. It fits the free plan.
+
+**Git deploys (recommended).** In **Workers & Pages → Create → Import a repository**, pick this repo.
+Use the defaults (deploy command `npx wrangler deploy`). The Worker name must match `name` in
+`wrangler.toml` (`ott-radar-india`).
+
+One-time setup:
+
+1. **D1 database.** Go to **Storage & Databases → D1 → Create**, named `ott-radar-india`. Open its
+   **Console** and run the contents of `schema.sql`. Put its ID in `wrangler.toml` (`database_id`).
+2. **Owner password.** In the Worker, go to **Settings → Variables and Secrets → Add**, choose type
+   **Secret**, name `ADMIN_TOKEN`, and use a long random value. Secrets survive later deploys.
+3. **Check it.** `https://<worker>.<subdomain>.workers.dev/api/manual?from=2026-11-01&to=2026-11-30`
+   should return `{"entries":[]}`.
+
+**From your computer instead:**
 
 ```bash
 npm install
 npx wrangler login
-
-# 1. Database for manual entries
-npx wrangler d1 create ott-radar-india        # copy the database_id into wrangler.toml
-npm run db:remote                              # creates the table
-
-# 2. Site
-npx wrangler pages project create ott-radar-india --production-branch main
+npm run db:remote                                  # creates the table in D1
+npx wrangler secret put ADMIN_TOKEN
 npm run deploy
-
-# 3. Owner password for the "Add a release" screen (use a long random string)
-npx wrangler pages secret put ADMIN_TOKEN --project-name ott-radar-india
-npm run deploy                                 # redeploy so the secret is picked up
 ```
-
-**Or use Git deploys:** push this folder to its own GitHub repo. In the Cloudflare dashboard, open
-**Workers & Pages → Create → Pages → Connect to Git**. Leave the build command empty and set the
-output directory to `public`. Then, in the project's **Settings**:
-
-- under **Bindings**, add D1 database `DB` → `ott-radar-india`
-- under **Variables and secrets**, add the secret `ADMIN_TOKEN`
 
 ### After deploying
 
@@ -84,7 +84,7 @@ npm i -D playwright && npx playwright install chromium
 npm test              # end-to-end test against a mocked TMDB (no token needed)
 ```
 
-`npm test` starts `wrangler pages dev` with a local D1 and replaces TMDB with a mock. It covers the
+`npm test` starts `wrangler dev` with a local D1 and replaces TMDB with a mock. It covers the
 day, week and month views, filters, title detail, the watchlist, manual entries (add, override,
 "Dates disagree", delete), the API's auth and validation, the CSP header, and the desktop layout.
 Screenshots go to `test-output/`.
@@ -99,8 +99,8 @@ public/            static app (no build step)
   js/tmdb.js       TMDB client (Bearer token or v3 API key)
   js/platforms.js  tracked platforms, provider-name matching, logos
   js/store.js      localStorage: token, filters, watchlist, cache
-functions/api/     Pages Functions: GET/POST /api/manual, DELETE /api/manual/:id
-lib/manual.js      shared validation and auth for the functions
+src/worker.js      Worker entry: routes /api/manual, everything else is static assets
+lib/manual.js      /api/manual handlers: validation, owner auth, D1 queries
 schema.sql         D1 table
 tests/e2e.mjs      end-to-end test
 ```

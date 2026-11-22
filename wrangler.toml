@@ -1,10 +1,17 @@
 name = "ott-radar-india"
-pages_build_output_dir = "public"
+main = "src/worker.js"
 compatibility_date = "2025-11-01"
 
-# Create it with:  npx wrangler d1 create ott-radar-india
-# then paste the database_id it prints below.
+# The site itself: files in ./public are served directly (with the _headers rules).
+# Requests that match no file (for example /api/*) go to src/worker.js.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
 [[d1_databases]]
 binding = "DB"
 database_name = "ott-radar-india"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "26346838-24be-4962-819a-efe73094536e"
+
+[observability]
+enabled = true
