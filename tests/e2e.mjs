@@ -8,6 +8,8 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
+// Let Playwright see (and mock) requests made by the service worker.
+process.env.PW_EXPERIMENTAL_SERVICE_WORKER_NETWORK_EVENTS = '1';
 const { chromium } = require('playwright');
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -154,6 +156,26 @@ async function main() {
     check((r.headers.get('content-security-policy') || '').includes("script-src 'self'"), 'CSP header is served');
 
     const browser = await chromium.launch();
+
+    console.log('Service worker (offline cache)');
+    {
+      const swCtx = await browser.newContext({ serviceWorkers: 'allow' });
+      await swCtx.route('https://image.tmdb.org/**', (route) => route.fulfill({ status: 200, contentType: 'image/png', body: PNG }));
+      const sp = await swCtx.newPage();
+      await sp.goto(`${BASE}/`);
+      await sp.evaluate(() => navigator.serviceWorker.ready);
+      await sp.reload();
+      check(await sp.evaluate(() => !!navigator.serviceWorker.controller), 'service worker installs and controls the page');
+      const res = await sp.evaluate(() => new Promise((ok) => {
+        const i = new Image();
+        i.onload = () => ok('loaded');
+        i.onerror = () => ok('error');
+        i.src = 'https://image.tmdb.org/t/p/w92/sw-test.png';
+      }));
+      check(res === 'loaded', 'TMDB images load through the service worker (CSP allows it)');
+      await swCtx.close();
+    }
+
     const errors = [];
     const ctx = await browser.newContext({ viewport: { width: 390, height: 844 }, timezoneId: TZ, locale: 'en-IN', serviceWorkers: 'block' });
     await ctx.route('https://api.themoviedb.org/**', async (route) => {
