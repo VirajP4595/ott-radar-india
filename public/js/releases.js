@@ -4,6 +4,7 @@ import { cacheGet, cacheSet, cacheRemovePrefix } from './store.js';
 import { pool } from './tmdb.js';
 import { PLATFORMS, keyForText, keysInText, idsForKeys } from './platforms.js';
 import * as D from './dates.js';
+import { langsInText, uniq } from './ui.js';
 
 const H = 3600e3;
 const MAX_MOVIE_PAGES = 5;
@@ -44,7 +45,7 @@ async function discoverIds(tmdb, path, params, maxPages) {
 
 // ---------- Movies
 async function movieInfo(tmdb, id) {
-  const ck = `m:${id}`;
+  const ck = `m2:${id}`;
   const c = cacheGet(ck);
   if (c) return c;
   const d = await tmdb.get(`/movie/${id}`, { append_to_response: 'watch/providers,release_dates' });
@@ -53,6 +54,7 @@ async function movieInfo(tmdb, id) {
     id: d.id,
     title: d.title || d.original_title || 'Untitled',
     lang: d.original_language || '',
+    langs: uniq([d.original_language, ...(d.spoken_languages || []).map((l) => l.iso_639_1)]),
     poster: d.poster_path || '',
     runtime: d.runtime || 0,
     genres: (d.genres || []).map((g) => g.name).slice(0, 3),
@@ -73,14 +75,15 @@ async function movieRelease(tmdb, map, id, from, to) {
   if (!platforms.length) return null; // not on a platform we track
   return {
     id: `movie:${m.id}:${hit.date}`, key: `movie:${m.id}`, mediaType: 'movie', tmdbId: m.id,
-    title: m.title, lang: m.lang, date: hit.date, platforms, kind: 'movie', label: '',
+    title: m.title, lang: m.lang, langs: uniq([m.lang, ...(m.langs || []), ...langsInText(hit.note)]),
+    date: hit.date, platforms, kind: 'movie', label: '',
     poster: m.poster, runtime: m.runtime, genres: m.genres, status: 'Confirmed', source: 'TMDB',
   };
 }
 
 // ---------- Series
 async function tvInfo(tmdb, id) {
-  const ck = `t:${id}`;
+  const ck = `t2:${id}`;
   const c = cacheGet(ck);
   if (c) return c;
   const d = await tmdb.get(`/tv/${id}`, { append_to_response: 'watch/providers' });
@@ -90,6 +93,7 @@ async function tvInfo(tmdb, id) {
     id: d.id,
     title: d.name || d.original_name || 'Untitled',
     lang: d.original_language || '',
+    langs: uniq([d.original_language, ...(d.languages || []), ...(d.spoken_languages || []).map((l) => l.iso_639_1)]),
     poster: d.poster_path || '',
     runtime: (d.episode_run_time || [])[0] || 0,
     genres: (d.genres || []).map((g) => g.name).slice(0, 3),
@@ -140,7 +144,7 @@ async function tvReleases(tmdb, map, id, from, to) {
     const { kind, label, finale } = tvLabel(list);
     return {
       id: `tv:${t.id}:${date}`, key: `tv:${t.id}`, mediaType: 'tv', tmdbId: t.id,
-      title: t.title, lang: t.lang, date, platforms, kind, label, finale,
+      title: t.title, lang: t.lang, langs: t.langs || [t.lang], date, platforms, kind, label, finale,
       poster: t.poster, runtime: t.runtime, genres: t.genres, status: 'Confirmed', source: 'TMDB',
     };
   });
@@ -148,7 +152,7 @@ async function tvReleases(tmdb, map, id, from, to) {
 
 /** All TMDB releases in India for month "YYYY-MM" on tracked platforms. Cached on the device. */
 export async function loadMonth(tmdb, map, mk, onProgress) {
-  const ck = `rel2:${mk}`;
+  const ck = `rel3:${mk}`;
   const c = cacheGet(ck);
   if (c) return c;
   const from = D.monthStart(mk);
@@ -194,7 +198,9 @@ function manualToRelease(m) {
     id: `manual:${m.id}`, manualId: m.id,
     key: m.tmdb_id ? `${m.media_type}:${m.tmdb_id}` : `manual:${m.id}`,
     mediaType: tv ? 'tv' : 'movie', tmdbId: m.tmdb_id || null,
-    title: m.title, lang: m.original_language || '', date: m.date, platforms: [m.platform],
+    title: m.title, lang: m.original_language || '',
+    langs: uniq([m.original_language, ...String(m.languages || '').split(',')]),
+    date: m.date, platforms: [m.platform],
     kind: tv ? (/^s\d+\s*e\d+/i.test(label) ? 'episode' : label ? 'season' : 'series') : 'movie',
     label, finale: /mid-?season finale/i.test(label) ? 'mid_season' : /finale/i.test(label) ? 'finale' : '',
     poster: m.poster_path || '', runtime: 0, genres: [],
@@ -236,6 +242,7 @@ export function mergeReleases(tmdbList, manual) {
       const same = t.find((x) => x.date === m.date);
       const ref = same || t[0];
       m.lang = m.lang || ref.lang;
+      m.langs = uniq([...(m.langs || []), ...(ref.langs || [])]);
       m.genres = ref.genres;
       m.runtime = ref.runtime;
       m.poster = m.poster || ref.poster;
@@ -255,15 +262,19 @@ export function mergeReleases(tmdbList, manual) {
 /**
  * kind: all | premieres (new series + season premieres) | movies | finales.
  * mine: only titles in the watchlist (their ordinary episodes included).
- * myPlatforms: the user's chosen services from Settings; others are never shown.
+ * myPlatforms / myLanguages: the user's choices from Settings; anything else is never shown.
  * In "all", ordinary episodes are hidden unless f.episodes is on; finales always show.
  */
-export function applyFilters(list, f, watchKeys = new Set(), myPlatforms = []) {
+export function applyFilters(list, f, watchKeys = new Set(), myPlatforms = [], myLanguages = []) {
   return list.filter((r) => {
+    // A title matches a language if it is in ANY of its known languages
+    // (original, spoken, named in the India release note, or ticked on a manual entry).
+    const langs = r.langs && r.langs.length ? r.langs : [r.lang];
     if (myPlatforms.length && !r.platforms.some((p) => myPlatforms.includes(p))) return false;
+    if (myLanguages.length && !langs.some((l) => myLanguages.includes(l))) return false;
     if (f.mine && !watchKeys.has(r.key)) return false;
     if (f.platforms.length && !r.platforms.some((p) => f.platforms.includes(p))) return false;
-    if (f.languages.length && !f.languages.includes(r.lang)) return false;
+    if (f.languages.length && !langs.some((l) => f.languages.includes(l))) return false;
     if (f.confirmedOnly && r.status !== 'Confirmed') return false;
     switch (f.kind) {
       case 'premieres': return r.kind === 'series' || r.kind === 'season';

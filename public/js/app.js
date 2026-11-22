@@ -3,7 +3,7 @@ import * as D from './dates.js';
 import { Tmdb, img } from './tmdb.js';
 import { PLATFORMS, platformByKey, keyForText, loadProviderMap } from './platforms.js';
 import { loadMonth, fetchManual, clearManualCache, mergeReleases, applyFilters } from './releases.js';
-import { esc, initials, tintClass, langName, fmtRuntime, icon, FILTER_LANGS } from './ui.js';
+import { esc, initials, tintClass, langName, fmtRuntime, icon, FILTER_LANGS, langsInText, uniq } from './ui.js';
 import { buildIcs, downloadIcs } from './ics.js';
 
 const H = 3600e3;
@@ -112,8 +112,12 @@ function kindText(r) {
   if (r.mediaType === 'movie') return 'Movie';
   return r.label || (r.kind === 'series' ? 'New series' : 'Series');
 }
+function langsLabel(r) {
+  const all = uniq([r.lang, ...(r.langs || [])]).map(langName).filter(Boolean);
+  return all.length > 3 ? `${all.slice(0, 3).join(', ')} +${all.length - 3}` : all.join(', ');
+}
 function metaText(r) {
-  return [kindText(r), langName(r.lang), r.runtime ? fmtRuntime(r.runtime) : '', (r.genres || [])[0]]
+  return [kindText(r), langsLabel(r), r.runtime ? fmtRuntime(r.runtime) : '', (r.genres || [])[0]]
     .filter(Boolean).join(' · ');
 }
 function statusTag(r) {
@@ -239,6 +243,13 @@ function myPlatforms() {
   const keys = new Set(PLATFORMS.map((p) => p.key));
   return S.getMyPlatforms().filter((k) => keys.has(k));
 }
+function myLanguages() {
+  return S.getMyLanguages().filter((l) => FILTER_LANGS.includes(l));
+}
+function visibleLanguages() {
+  const my = myLanguages();
+  return my.length ? FILTER_LANGS.filter((l) => my.includes(l)) : FILTER_LANGS;
+}
 function visiblePlatforms() {
   const my = myPlatforms();
   return my.length ? PLATFORMS.filter((p) => my.includes(p.key)) : PLATFORMS;
@@ -264,11 +275,12 @@ function filterPanel() {
     return `<button class="pbtn ${on ? 'on' : ''}" data-action="toggle-platform" data-key="${p.key}" aria-pressed="${on}">${pLogo(p.key)}<span class="pname">${esc(p.name)}</span><span class="tick">${on ? '✓' : ''}</span></button>`;
   }).join('')}</div>
       <p class="hint">${mineSet ? `Showing your ${mineSet} services. <a href="#/settings">Change them in Settings</a>.` : 'None selected shows every platform. <a href="#/settings">Pick your services</a> to hide the rest everywhere.'}</p></section>
-    <section class="fsec"><h2 class="label">Original language</h2>
-      <div class="wrap">${FILTER_LANGS.map((l) => {
+    <section class="fsec"><h2 class="label">Language</h2>
+      <div class="wrap">${visibleLanguages().map((l) => {
     const on = f.languages.includes(l);
     return `<button class="pill ${on ? 'on' : ''}" data-action="toggle-lang" data-key="${l}" aria-pressed="${on}">${esc(langName(l))}</button>`;
-  }).join('')}</div></section>
+  }).join('')}</div>
+      <p class="hint">${myLanguages().length ? `Showing your ${myLanguages().length} languages. <a href="#/settings">Change them in Settings</a>.` : 'Matches original, spoken or dubbed languages TMDB knows about.'}</p></section>
     <section class="fsec switches">
       <label class="switch"><span><strong>Confirmed dates only</strong><small>Hide "Expected" dates from manual entries</small></span>
         <input type="checkbox" data-action="toggle-confirmed" ${f.confirmedOnly ? 'checked' : ''}></label>
@@ -292,7 +304,7 @@ async function renderRange(view, param) {
   const draw = () => {
     const data = collect(months, from, to);
     state.watchKeys = new Set(S.getWatchlist().map((i) => i.key));
-    const list = data && applyFilters(data, S.getFilters(), state.watchKeys, myPlatforms());
+    const list = data && applyFilters(data, S.getFilters(), state.watchKeys, myPlatforms(), myLanguages());
     const body = view === 'day' ? dayBody(anchor, list) : view === 'week' ? weekBody(anchor, from, list) : monthBody(anchor, list);
     render(page({ nav: 'releases', subtitle: `India · ${D.fmtLong(D.today())}`, body, sidebar: filterPanel(), connect: true }));
     const bar = document.getElementById('progress-bar');
@@ -402,7 +414,7 @@ function monthBody(anchor, list) {
 
 // ---------------------------------------------------------------- title detail
 async function titleDetail(type, id) {
-  const ck = `d:${type}:${id}`;
+  const ck = `d2:${type}:${id}`;
   const c = S.cacheGet(ck);
   if (c) return c;
   await ensureProviders();
@@ -422,6 +434,8 @@ async function titleDetail(type, id) {
     poster: d.poster_path || '', backdrop: d.backdrop_path || '',
     lang: d.original_language || '',
     spoken: (d.spoken_languages || []).map((l) => l.english_name || l.name).filter(Boolean),
+    langs: uniq([d.original_language, ...(d.languages || []), ...(d.spoken_languages || []).map((l) => l.iso_639_1),
+      ...rd.filter((r) => r.type === 4).flatMap((r) => langsInText(r.note))]),
     seasons: d.number_of_seasons || 0,
     cert: rd.find((r) => r.certification)?.certification || '',
     theatrical: rd.filter((r) => r.type === 2 || r.type === 3).map((r) => r.release_date.slice(0, 10)).sort()[0] || '',
@@ -458,6 +472,7 @@ async function renderTitle(type, id) {
   const date = rel?.date || (t.digital.length ? t.digital[t.digital.length - 1] : '');
   const platforms = rel?.platforms?.length ? rel.platforms : t.providers;
   const saved = S.inWatchlist(key);
+  const dLangs = uniq([t.lang, ...(t.langs || []), ...(rel?.langs || [])]);
   const meta = [type === 'movie' ? 'Movie' : `Series${t.seasons ? ` · ${t.seasons} season${t.seasons > 1 ? 's' : ''}` : ''}`,
     t.year, t.runtime ? fmtRuntime(t.runtime) : '', t.genres.slice(0, 2).join(', '), t.cert].filter(Boolean).join(' · ');
 
@@ -493,7 +508,8 @@ async function renderTitle(type, id) {
         ${date ? `<button class="btn btn-ghost" data-action="export-one">${icon.calAdd}Add to calendar</button>` : ''}
         ${t.link ? `<a class="btn btn-ghost" href="${esc(t.link)}" target="_blank" rel="noopener noreferrer">Where to watch ${icon.ext}</a>` : ''}
       </div>
-      ${t.spoken.length ? `<section class="dsec"><h2 class="label">Audio</h2><div class="wrap">${t.spoken.map((l) => `<span class="pill static">${esc(l)}</span>`).join('')}</div></section>` : ''}
+      ${dLangs.length ? `<section class="dsec"><h2 class="label">Languages</h2><div class="wrap">${dLangs.map((l, i) => `<span class="pill static">${esc(langName(l))}${i === 0 && l === t.lang ? ' (original)' : ''}</span>`).join('')}</div>
+        <p class="muted small">From TMDB${rel?.source === 'Manual' ? ' and the manual entry' : ''}. Dubbed versions are not always listed.</p></section>` : ''}
       ${t.overview ? `<section class="dsec"><h2 class="label">Story</h2><p class="story">${esc(t.overview)}</p></section>` : ''}
       ${t.cast.length ? `<section class="dsec"><h2 class="label">Cast</h2><div class="cast">${t.cast.map((c) => {
     const src = img(c.profile, 'w185');
@@ -527,7 +543,7 @@ function countForBack(back) {
   if (view === 'week') { from = D.weekStart(anchor); to = D.addDays(from, 6); }
   if (view === 'month') { from = D.monthStart(D.monthKey(anchor)); to = D.monthEnd(D.monthKey(anchor)); }
   const data = collect(D.monthsBetween(from, to), from, to);
-  return data ? applyFilters(data, S.getFilters(), new Set(S.getWatchlist().map((i) => i.key)), myPlatforms()).length : null;
+  return data ? applyFilters(data, S.getFilters(), new Set(S.getWatchlist().map((i) => i.key)), myPlatforms(), myLanguages()).length : null;
 }
 
 // ---------------------------------------------------------------- watchlist
@@ -602,6 +618,7 @@ async function checkReminders() {
 // ---------------------------------------------------------------- settings
 function renderSettings() {
   const my = myPlatforms();
+  const myL = myLanguages();
   if (state.tmdb && !state.providers && !state.authError && !state.loadingLogos) {
     // Load the official logos for the service picker, then redraw.
     state.loadingLogos = true;
@@ -646,6 +663,15 @@ function renderSettings() {
     return `<button class="pbtn ${on ? 'on' : ''}" data-action="toggle-my" data-key="${p.key}" aria-pressed="${on}">${pLogo(p.key)}<span class="pname">${esc(p.name)}</span><span class="tick">${on ? '✓' : ''}</span></button>`;
   }).join('')}</div>
       ${my.length ? '<button class="btn btn-ghost small" data-action="my-clear">Show all services again</button>' : ''}
+    </section>
+    <section class="panel" id="my-languages">
+      <div class="panel-head"><h2>My languages</h2><span class="muted small">${myL.length ? `${myL.length} selected` : 'All languages shown'}</span></div>
+      <p class="small muted">Only titles available in at least one of these languages appear. A Telugu film that also releases in Hindi counts as Hindi, when TMDB or a manual entry lists that language.</p>
+      <div class="wrap">${FILTER_LANGS.map((l) => {
+    const on = myL.includes(l);
+    return `<button class="pill ${on ? 'on' : ''}" data-action="toggle-mylang" data-key="${l}" aria-pressed="${on}">${esc(langName(l))}</button>`;
+  }).join('')}</div>
+      ${myL.length ? '<button class="btn btn-ghost small" data-action="mylang-clear">Show all languages again</button>' : ''}
     </section>
     <section class="panel links">
       <a href="#/filters?back=%23%2F">Filters and languages <span class="muted">›</span></a>
@@ -765,6 +791,8 @@ async function renderAdmin(query) {
       </div>
       <fieldset class="field"><legend>How sure is this date?</legend><div class="seg small">
         ${['Expected', 'Confirmed'].map((s) => `<button type="button" class="${a.status === s ? 'on' : ''}" data-action="set-status" data-key="${s}" aria-pressed="${a.status === s}">${s}</button>`).join('')}</div></fieldset>
+      <fieldset class="field"><legend>Languages it releases in</legend><div class="wrap">${FILTER_LANGS.map((l) =>
+    `<label class="pill check"><input type="checkbox" name="lang" value="${l}" ${l === sel.lang ? 'checked' : ''}>${esc(langName(l))}</label>`).join('')}</div></fieldset>
       ${sel.mediaType === 'tv' ? '<label class="field"><span>Label <small class="muted">(for example "Season 2")</small></span><input name="label" maxlength="60"></label>' : ''}
       <label class="field"><span>Source link <small class="muted">(news article or official post)</small></span><input name="source" type="url" maxlength="500" placeholder="https://"></label>
       <p class="muted small">If TMDB later shows a different date, the app keeps yours and marks the title "Dates disagree".</p>
@@ -864,6 +892,16 @@ const actions = {
     }
     rerender();
   },
+  'toggle-mylang': (el) => {
+    const next = toggle(myLanguages(), el.dataset.key);
+    S.setMyLanguages(next);
+    if (next.length) {
+      const f = S.getFilters();
+      S.setFilters({ ...f, languages: f.languages.filter((k) => next.includes(k)) });
+    }
+    rerender();
+  },
+  'mylang-clear': () => { S.setMyLanguages([]); toast('Showing all languages'); rerender(); },
   'my-clear': () => { S.setMyPlatforms([]); toast('Showing all services'); rerender(); },
   'set-kind': (el) => updateFilters((f) => ({ ...f, kind: el.dataset.key })),
   'toggle-mine': () => updateFilters((f) => ({ ...f, mine: !f.mine })),
@@ -1009,6 +1047,7 @@ const forms = {
       tmdb_id: sel.tmdbId, media_type: sel.mediaType, title: sel.title, poster_path: sel.poster || null,
       original_language: sel.lang || '', platform: form.platform.value, date: form.date.value,
       status: a.status, label: form.label ? form.label.value.trim() : '', source_url: form.source.value.trim(),
+      languages: [...form.querySelectorAll('input[name=lang]:checked')].map((x) => x.value),
     };
     a.busy = true;
     a.error = '';

@@ -57,6 +57,12 @@ export const getMyPlatforms = () => {
 };
 export const setMyPlatforms = (v) => write('myPlatforms', v);
 
+export const getMyLanguages = () => {
+  const v = read('myLanguages', []);
+  return Array.isArray(v) ? v.filter((x) => typeof x === 'string') : [];
+};
+export const setMyLanguages = (v) => write('myLanguages', v);
+
 // ---- Layout: "list" or "posters"
 export const getLayout = () => (read('layout', 'list') === 'posters' ? 'posters' : 'list');
 export const setLayout = (v) => write('layout', v === 'posters' ? 'posters' : 'list');

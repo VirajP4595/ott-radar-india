@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS manual (
   title TEXT NOT NULL,
   poster_path TEXT,
   original_language TEXT,
+  languages TEXT, -- comma-separated codes, e.g. "te,hi,ta"
   platform TEXT NOT NULL,
   date TEXT NOT NULL,
   status TEXT NOT NULL CHECK (status IN ('Expected', 'Confirmed')),

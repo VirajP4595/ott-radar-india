@@ -43,7 +43,7 @@ const PROVIDERS = [
 
 const MOVIES = {
   101: { title: 'Monsoon Ledger', lang: 'hi', dates: [[T, '']], prov: [8], theatrical: addDays(T, -42) },
-  102: { title: 'Neelam', lang: 'ta', dates: [[T, '']], prov: [119] },
+  102: { title: 'Neelam', lang: 'ta', dates: [[T, 'Tamil, Telugu, Hindi']], prov: [119] },
   103: { title: 'Godavari Nights', lang: 'te', dates: [[addDays(T, 1), 'Streaming on Aha']], prov: [] },
   104: { title: 'Untracked Film', lang: 'en', dates: [[T, '']], prov: [999] },
   105: { title: 'Baarish Ke Baad', lang: 'hi', dates: [[addDays(T, -1), '']], prov: [232] },
@@ -261,6 +261,19 @@ async function main() {
     await page.getByText('Second Shift').first().waitFor();
     check(true, '"Show all services again" restores everything');
 
+    console.log('My languages (Settings)');
+    await page.goto(`${BASE}/#/settings`);
+    await page.click('#my-languages button[data-key=hi]');
+    await page.goto(`${BASE}/#/day/${T}`);
+    await page.locator('a.card').first().waitFor();
+    let days = await page.locator('main').innerText();
+    check(days.includes('Monsoon Ledger') && days.includes('Second Shift'), 'Hindi titles shown with "My languages: Hindi"');
+    check(days.includes('Neelam'), 'Tamil film that also releases in Hindi (per the release note) is NOT missed');
+    check(!days.includes('Godavari Nights'), 'Telugu-only film is hidden');
+    const neelamCard = await page.locator('a.card:has-text("Neelam")').innerText(); check(['Tamil', 'Telugu', 'Hindi'].every((l) => neelamCard.includes(l)), `card lists all known languages [${neelamCard.replace(/\n/g, ' | ')}]`);
+    await page.goto(`${BASE}/#/settings`);
+    await page.click('button[data-action=mylang-clear]');
+
     console.log('Week + month');
     await page.goto(`${BASE}/#/week/${T}`);
     await page.locator('.week-groups').waitFor();
@@ -337,6 +350,7 @@ async function main() {
     await page.selectOption('select[name=platform]', 'zee5');
     await page.fill('input[name=date]', addDays(T, 3));
     await page.fill('input[name=source]', 'https://example.com/news');
+    await page.check('input[name=lang][value=hi]');
     await shot('08-admin');
     await page.click('button:has-text("Save release")');
     await page.locator('.wrow:has-text("Kaaval")').waitFor();
@@ -345,6 +359,8 @@ async function main() {
     await page.getByText('Kaaval').first().waitFor({ timeout: 20000 });
     const d3 = await page.locator('.sec').first().innerText();
     check(d3.includes('Expected'), 'manual entry shows as "Expected" on its day');
+    const apiRows = await (await fetch(`${BASE}/api/manual?from=${T}&to=${addDays(T, 10)}`)).json();
+    check(apiRows.entries.some((e) => e.title === 'Kaaval' && e.languages === 'ta,hi'), 'manual entry stores its languages (original + ticked)');
 
     // Manual date that disagrees with TMDB
     await page.goto(`${BASE}/#/admin?prefill=movie:101`);

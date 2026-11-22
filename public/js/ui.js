@@ -19,6 +19,12 @@ const LANGS = {
   bn: 'Bengali', mr: 'Marathi', pa: 'Punjabi', gu: 'Gujarati', ko: 'Korean', ja: 'Japanese',
 };
 export const FILTER_LANGS = ['hi', 'en', 'ta', 'te', 'ml', 'kn', 'bn', 'mr', 'pa', 'gu', 'ko'];
+/** Language codes named in free text such as a TMDB release note ("Tamil, Telugu, Hindi"). */
+export function langsInText(text) {
+  if (!text) return [];
+  return Object.entries(LANGS).filter(([, name]) => new RegExp(`\\b${name}\\b`, 'i').test(text)).map(([code]) => code);
+}
+export const uniq = (a) => [...new Set(a.filter(Boolean))];
 let names = null;
 try { names = new Intl.DisplayNames(['en'], { type: 'language' }); } catch { /* old browser */ }
 export function langName(code) {
