@@ -20,6 +20,7 @@ const state = {
   editToken: false,
   search: { q: '', results: null, error: '' },
   watchKeys: new Set(),
+  publicLogos: null,
   admin: { results: null, sel: null, status: 'Expected', list: null, error: '', busy: false, prefilled: '' },
 };
 
@@ -32,6 +33,40 @@ function initTmdb() {
 async function ensureProviders() {
   if (state.providers || !state.tmdb) return;
   state.providers = await loadProviderMap(state.tmdb);
+  syncLogos();
+}
+
+// Owner only: share TMDB's official logo paths so visitors without a token see them too.
+async function syncLogos() {
+  const logos = state.providers?.logos;
+  if (!logos || !S.getAdminToken()) return;
+  if (state.publicLogos && JSON.stringify(state.publicLogos) === JSON.stringify(logos)) return;
+  try {
+    const res = await fetch('/api/logos', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${S.getAdminToken()}` },
+      body: JSON.stringify({ logos }),
+    });
+    if (res.ok) {
+      state.publicLogos = { ...logos };
+      S.cacheSet('publogos', state.publicLogos, 24 * H);
+    }
+  } catch { /* offline: try again next time */ }
+}
+
+async function loadPublicLogos() {
+  const c = S.cacheGet('publogos');
+  if (c) { state.publicLogos = c; return false; }
+  try {
+    const res = await fetch('/api/logos');
+    if (!res.ok) return false;
+    state.publicLogos = (await res.json()).logos || {};
+    // Not shared yet? Check again in an hour instead of a day.
+    S.cacheSet('publogos', state.publicLogos, Object.keys(state.publicLogos).length ? 24 * H : H);
+    return Object.keys(state.publicLogos).length > 0;
+  } catch {
+    return false;
+  }
 }
 
 function ensureMonth(mk) {
@@ -100,7 +135,7 @@ function syncWatchlist(list) {
 const isToday = (d) => d === D.today();
 
 function pLogo(key) {
-  const logo = state.providers?.logos?.[key];
+  const logo = state.providers?.logos?.[key] || state.publicLogos?.[key];
   return logo
     ? `<img class="plogo" src="${img(logo, 'w92')}" alt="" width="20" height="20" loading="lazy">`
     : `<span class="pdot p-${esc(key)}"></span>`;
@@ -523,6 +558,10 @@ async function renderTitle(type, id) {
 
 // ---------------------------------------------------------------- filters sheet
 function renderFilters(query) {
+  if (state.tmdb && !state.providers && !state.authError && !state.loadingLogos) {
+    state.loadingLogos = true;
+    ensureProviders().then(() => { if (location.hash.startsWith('#/filters')) rerender(); }).catch(() => {}).finally(() => { state.loadingLogos = false; });
+  }
   const back = safeBack(query.get('back'));
   const n = countForBack(back);
   render(`<div class="sheet-page"><div class="sheet" role="dialog" aria-label="Filters">
@@ -1023,6 +1062,8 @@ const forms = {
   },
   'admin-token': (form) => {
     S.setAdminToken(form.admin.value.trim());
+    state.publicLogos = null;
+    syncLogos();
     toast('Owner tools unlocked on this device');
     rerender();
   },
@@ -1088,6 +1129,7 @@ document.addEventListener('visibilitychange', () => {
 
 initTmdb();
 route();
+loadPublicLogos().then((fresh) => { if (fresh && !state.providers) rerender(); });
 checkReminders();
 if ('serviceWorker' in navigator && location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1') {
   navigator.serviceWorker?.register('/sw.js').catch(() => {});

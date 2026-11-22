@@ -343,6 +343,21 @@ async function main() {
     await page.goto(`${BASE}/#/settings`);
     await page.fill('input[name=admin]', ADMIN);
     await page.click('button:has-text("Unlock")');
+    await page.waitForFunction(async () => Object.keys((await (await fetch('/api/logos')).json()).logos).length > 0, null, { timeout: 10000 }).catch(() => {});
+    const shared = await (await fetch(`${BASE}/api/logos`)).json();
+    check(shared.logos.netflix === '/logo8.png' && shared.logos.prime === '/logo119.png', "owner's browser shares TMDB's official logos with the site");
+    r = await fetch(`${BASE}/api/logos`, { method: 'PUT', body: JSON.stringify({ logos: { netflix: '/x.png' } }) });
+    check(r.status === 401, 'saving logos without the admin token is rejected');
+    {
+      const vctx = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block' });
+      await vctx.route('https://image.tmdb.org/**', (route) => route.fulfill({ status: 200, contentType: 'image/png', body: PNG }));
+      const vp = await vctx.newPage();
+      await vp.goto(`${BASE}/#/filters`);
+      await vp.locator('.pbtn img.plogo').first().waitFor({ timeout: 10000 }).catch(() => {});
+      check(await vp.locator('.pbtn img.plogo').count() >= 6, 'a visitor with NO TMDB token still sees the official platform logos');
+      await vp.screenshot({ path: path.join(OUT, '11-visitor-logos.png') });
+      await vctx.close();
+    }
     await page.goto(`${BASE}/#/admin`);
     await page.fill('form[data-form=tmdb-search] input[name=q]', 'Kaaval');
     await page.click('form[data-form=tmdb-search] button');
