@@ -33,18 +33,26 @@ export const getLastFetch = () => read('lastFetch', 0);
 export const setLastFetch = (t) => write('lastFetch', t);
 
 // ---- Filters
+export const KINDS = ['all', 'premieres', 'movies', 'finales'];
 export const DEFAULT_FILTERS = Object.freeze({
-  platforms: [], languages: [], type: 'all', episodes: false, confirmedOnly: false,
+  platforms: [], languages: [], kind: 'all', mine: false, episodes: false, confirmedOnly: false,
 });
 export function getFilters() {
   const f = { ...DEFAULT_FILTERS, ...read('filters', {}) };
   if (!Array.isArray(f.platforms)) f.platforms = [];
   if (!Array.isArray(f.languages)) f.languages = [];
+  if (!KINDS.includes(f.kind)) f.kind = 'all';
+  f.mine = !!f.mine;
+  delete f.type; // replaced by "kind" tabs
   return f;
 }
 export const setFilters = (f) => write('filters', f);
 export const filtersActive = (f = getFilters()) =>
-  f.platforms.length > 0 || f.languages.length > 0 || f.type !== 'all' || f.episodes || f.confirmedOnly;
+  f.platforms.length > 0 || f.languages.length > 0 || f.episodes || f.confirmedOnly;
+
+// ---- Layout: "list" or "posters"
+export const getLayout = () => (read('layout', 'list') === 'posters' ? 'posters' : 'list');
+export const setLayout = (v) => write('layout', v === 'posters' ? 'posters' : 'list');
 
 // ---- Watchlist
 export const getWatchlist = () => {

@@ -4,6 +4,7 @@ import { Tmdb, img } from './tmdb.js';
 import { PLATFORMS, platformByKey, keyForText, loadProviderMap } from './platforms.js';
 import { loadMonth, fetchManual, clearManualCache, mergeReleases, applyFilters } from './releases.js';
 import { esc, initials, tintClass, langName, fmtRuntime, icon, FILTER_LANGS } from './ui.js';
+import { buildIcs, downloadIcs } from './ics.js';
 
 const H = 3600e3;
 const $app = document.getElementById('app');
@@ -18,6 +19,7 @@ const state = {
   tokenError: '',
   editToken: false,
   search: { q: '', results: null, error: '' },
+  watchKeys: new Set(),
   admin: { results: null, sel: null, status: 'Expected', list: null, error: '', busy: false, prefilled: '' },
 };
 
@@ -124,17 +126,54 @@ function posterBox(r, size) {
 }
 const titleHref = (r) => (r.tmdbId ? `#/title/${r.mediaType}/${r.tmdbId}` : '#/');
 
+function kindBadge(r) {
+  if (r.finale) return `<span class="kbadge fin">${r.finale === 'mid_season' ? 'Mid-season finale' : 'Finale'}</span>`;
+  if (r.kind === 'series') return '<span class="kbadge prem">New series</span>';
+  if (r.kind === 'season') return '<span class="kbadge prem">Premiere</span>';
+  return '';
+}
+const wmark = (r) => (state.watchKeys.has(r.key) ? `<span class="wmark" title="In your watchlist"><span class="sr-only">In your watchlist</span>${icon.mark}</span>` : '');
+
 function cardLg(r) {
-  return `<a class="card" href="${titleHref(r)}">${posterBox(r, 'w185')}
-    <div class="card-body"><span class="card-title">${esc(r.title)}</span>
+  return `<a class="card ${state.watchKeys.has(r.key) ? 'is-mine' : ''}" href="${titleHref(r)}">${posterBox(r, 'w185')}
+    <div class="card-body"><span class="card-title">${wmark(r)}${esc(r.title)}</span>
     <span class="card-meta">${esc(metaText(r))}</span>
-    <div class="card-tags">${r.platforms.map(pTag).join('')}${statusTag(r)}</div></div></a>`;
+    <div class="card-tags">${r.platforms.map(pTag).join('')}${kindBadge(r)}${statusTag(r)}</div></div></a>`;
 }
 function cardSm(r) {
   const name = platformByKey(r.platforms[0])?.name || '';
-  return `<a class="row" href="${titleHref(r)}">${posterBox(r, 'w92')}
-    <div class="row-body"><span class="row-title">${esc(r.title)}</span><span class="row-meta">${esc(metaText(r))}</span></div>
+  return `<a class="row ${state.watchKeys.has(r.key) ? 'is-mine' : ''}" href="${titleHref(r)}">${posterBox(r, 'w92')}
+    <div class="row-body"><span class="row-title">${wmark(r)}${esc(r.title)}</span><span class="row-meta">${esc(metaText(r))}</span></div>
     <span class="row-plat">${pLogo(r.platforms[0])}<span class="row-pname">${esc(name)}</span></span></a>`;
+}
+function tile(r) {
+  const sub = r.mediaType === 'movie' ? 'Movie' : (r.label || 'Series');
+  return `<a class="tile ${state.watchKeys.has(r.key) ? 'is-mine' : ''}" href="${titleHref(r)}">
+    <div class="tile-art">${posterBox(r, 'w342')}<span class="tile-badges">${kindBadge(r)}${r.status === 'Expected' || r.conflict ? statusTag(r) : ''}</span>${wmark(r)}</div>
+    <span class="tile-title">${esc(r.title)}</span>
+    <span class="tile-meta">${pLogo(r.platforms[0])}<span>${esc(sub)}</span></span></a>`;
+}
+function listOrTiles(items, size) {
+  if (S.getLayout() === 'posters') return `<div class="tiles">${items.map(tile).join('')}</div>`;
+  return size === 'lg' ? `<div class="cards">${items.map(cardLg).join('')}</div>` : `<div class="rows">${items.map(cardSm).join('')}</div>`;
+}
+const KIND_TABS = [['all', 'All'], ['premieres', 'Premieres'], ['movies', 'Movies'], ['finales', 'Finales']];
+function kindTabs(withLayout) {
+  const f = S.getFilters();
+  const lay = S.getLayout();
+  return `<div class="kindbar">
+    <div class="chips" role="group" aria-label="Release type">${KIND_TABS.map(([k, l]) =>
+    `<button class="chip ${f.kind === k ? 'on' : ''}" data-action="set-kind" data-key="${k}" aria-pressed="${f.kind === k}">${l}</button>`).join('')}
+      <button class="chip mine ${f.mine ? 'on' : ''}" data-action="toggle-mine" aria-pressed="${f.mine}">${icon.mark}My watchlist</button></div>
+    ${withLayout ? `<div class="laytoggle" role="group" aria-label="Layout">
+      <button class="iconbtn ghost ${lay === 'list' ? 'on' : ''}" data-action="set-layout" data-key="list" aria-pressed="${lay === 'list'}" aria-label="List layout">${icon.list}</button>
+      <button class="iconbtn ghost ${lay === 'posters' ? 'on' : ''}" data-action="set-layout" data-key="posters" aria-pressed="${lay === 'posters'}" aria-label="Posters layout">${icon.grid}</button></div>` : ''}
+  </div>`;
+}
+function emptyFor(scope) {
+  const f = S.getFilters();
+  if (f.mine) return `Nothing from your watchlist ${scope}.`;
+  return { premieres: `No premieres ${scope}.`, movies: `No movies ${scope}.`, finales: `No finales ${scope}.` }[f.kind] || `Nothing tracked ${scope} yet.`;
 }
 
 function navLinks(active, cls) {
@@ -220,13 +259,10 @@ function filterPanel() {
     const on = f.languages.includes(l);
     return `<button class="pill ${on ? 'on' : ''}" data-action="toggle-lang" data-key="${l}" aria-pressed="${on}">${esc(langName(l))}</button>`;
   }).join('')}</div></section>
-    <section class="fsec"><h2 class="label">Type</h2>
-      <div class="seg small">${[['all', 'Both'], ['movie', 'Movies'], ['tv', 'Series']].map(([k, l]) =>
-    `<button class="${f.type === k ? 'on' : ''}" data-action="set-type" data-key="${k}" aria-pressed="${f.type === k}">${l}</button>`).join('')}</div></section>
     <section class="fsec switches">
       <label class="switch"><span><strong>Confirmed dates only</strong><small>Hide "Expected" dates from manual entries</small></span>
         <input type="checkbox" data-action="toggle-confirmed" ${f.confirmedOnly ? 'checked' : ''}></label>
-      <label class="switch"><span><strong>Every new episode</strong><small>Off shows only new series and season premieres</small></span>
+      <label class="switch"><span><strong>Every new episode</strong><small>Off shows only new series, premieres and finales in "All"</small></span>
         <input type="checkbox" data-action="toggle-episodes" ${f.episodes ? 'checked' : ''}></label>
     </section>`;
 }
@@ -245,7 +281,8 @@ async function renderRange(view, param) {
   const months = D.monthsBetween(from, to);
   const draw = () => {
     const data = collect(months, from, to);
-    const list = data && applyFilters(data, S.getFilters());
+    state.watchKeys = new Set(S.getWatchlist().map((i) => i.key));
+    const list = data && applyFilters(data, S.getFilters(), state.watchKeys);
     const body = view === 'day' ? dayBody(anchor, list) : view === 'week' ? weekBody(anchor, from, list) : monthBody(anchor, list);
     render(page({ nav: 'releases', subtitle: `India · ${D.fmtLong(D.today())}`, body, sidebar: filterPanel(), connect: true }));
     const bar = document.getElementById('progress-bar');
@@ -272,7 +309,7 @@ function dayBody(anchor, list) {
   const sec = (title, date) => {
     const items = list.filter((r) => r.date === date);
     return `<section class="sec"><div class="sec-head"><h2>${esc(title)}</h2><span class="muted small">${countText(items.length)}</span></div>
-      ${items.length ? `<div class="cards">${items.map(cardLg).join('')}</div>` : emptyMsg('Nothing tracked for this day yet.')}</section>`;
+      ${items.length ? listOrTiles(items, 'lg') : emptyMsg(emptyFor('on this day'))}</section>`;
   };
   const head1 = isToday(anchor) ? 'Streaming today' : D.fmtLong(anchor);
   const head2 = isToday(anchor) ? `Tomorrow · ${D.fmtShort(next)}` : D.fmtLong(next);
@@ -283,23 +320,21 @@ function dayBody(anchor, list) {
       <a class="iconbtn ghost" href="#/day/${D.addDays(anchor, 7)}" aria-label="Next week">${icon.right}</a>
     </div>
     ${isToday(anchor) ? '' : `<p class="center"><a href="#/day/${D.today()}">Back to today</a></p>`}
+    ${kindTabs(true)}
     <div class="mobile-only">${platformChips()}</div>
     ${list ? sec(head1, anchor) + sec(head2, next) : loadingBlock()}`;
 }
 
 function weekBody(anchor, from, list) {
   const to = D.addDays(from, 6);
-  const f = S.getFilters();
   const thisWeek = D.weekStart(D.today()) === from;
-  const kinds = [['all', 'All'], ['movie', 'Movies'], ['tv', 'Series']].map(([k, l]) =>
-    `<button class="chip ${f.type === k ? 'on' : ''}" data-action="set-type" data-key="${k}" aria-pressed="${f.type === k}">${l}</button>`).join('');
   let groups = '';
   if (list) {
     groups = Array.from({ length: 7 }, (_, i) => D.addDays(from, i)).map((d) => {
       const items = list.filter((r) => r.date === d);
       return `<section class="day-group ${items.length ? '' : 'empty'} ${isToday(d) ? 'is-today' : ''}">
         <div class="day-head"><span class="dh-day">${esc(D.fmtShort(d))}${isToday(d) ? ' · Today' : ''}</span><span class="dh-line"></span><span class="muted small">${countText(items.length)}</span></div>
-        <div class="rows">${items.length ? items.map(cardSm).join('') : '<p class="muted small none">No releases</p>'}</div></section>`;
+        ${items.length ? listOrTiles(items, 'sm') : '<p class="muted small none">No releases</p>'}</section>`;
     }).join('');
   }
   return `${rangeTabs('week', anchor)}
@@ -309,8 +344,8 @@ function weekBody(anchor, from, list) {
       <span class="muted small">${thisWeek ? 'This week' : `<a href="#/week/${D.today()}">Back to this week</a>`}${list ? ` · ${countText(list.length)}` : ''}</span></div>
       <a class="iconbtn ghost" href="#/week/${D.addDays(from, 7)}" aria-label="Next week">${icon.right}</a>
     </div>
-    <div class="chips">${kinds}</div>
-    ${list ? (list.length ? `<div class="week-groups">${groups}</div>` : emptyMsg('Nothing tracked for this week with your filters.')) : loadingBlock()}`;
+    ${kindTabs(true)}
+    ${list ? (list.length ? `<div class="week-groups">${groups}</div>` : emptyMsg(emptyFor('this week'))) : loadingBlock()}`;
 }
 
 function monthBody(anchor, list) {
@@ -323,9 +358,15 @@ function monthBody(anchor, list) {
   for (let d = start; d <= end; d = D.addDays(d, 1)) {
     const items = list ? list.filter((r) => r.date === d) : [];
     const keys = [...new Set(items.flatMap((r) => r.platforms))].slice(0, 3);
-    cells.push(`<a class="cal-cell ${d === anchor ? 'on' : ''} ${isToday(d) ? 'today' : ''}" href="#/month/${d}"
-      aria-label="${esc(D.fmtLong(d))}, ${items.length} releases" ${d === anchor ? 'aria-current="date"' : ''}>
-      <span>${D.dayNum(d)}</span><span class="dots">${keys.map((k) => `<span class="mdot p-${k}"></span>`).join('')}</span>
+    const mine = items.some((r) => state.watchKeys.has(r.key));
+    const thumbs = items.slice(0, 3).map((r) => {
+      const src = img(r.poster, 'w92');
+      return src ? `<img src="${src}" alt="" loading="lazy">` : `<span class="thumb-ph ${tintClass(r.title)}"></span>`;
+    }).join('');
+    cells.push(`<a class="cal-cell ${d === anchor ? 'on' : ''} ${isToday(d) ? 'today' : ''} ${mine ? 'has-mine' : ''}" href="#/month/${d}"
+      aria-label="${esc(D.fmtLong(d))}, ${items.length} releases${mine ? ', includes your watchlist' : ''}" ${d === anchor ? 'aria-current="date"' : ''}>
+      <span class="cal-d">${D.dayNum(d)}</span><span class="dots">${keys.map((k) => `<span class="mdot p-${k}"></span>`).join('')}</span>
+      <span class="thumbs" aria-hidden="true">${thumbs}${items.length > 3 ? `<span class="more">+${items.length - 3}</span>` : ''}</span>
       ${items.length ? `<span class="cal-n">${items.length}</span>` : ''}</a>`);
   }
   const sel = list ? list.filter((r) => r.date === anchor) : [];
@@ -336,6 +377,7 @@ function monthBody(anchor, list) {
       <div class="rn-title"><h1>${esc(D.fmtMonth(mk))}</h1>${list ? `<span class="muted small">${countText(list.length)}</span>` : ''}</div>
       <a class="iconbtn ghost" href="#/month/${D.addMonths(mk, 1)}-01" aria-label="Next month">${icon.right}</a>
     </div>
+    ${kindTabs(false)}
     <div class="month-wrap">
       <div class="cal-box">
         <div class="cal-head" aria-hidden="true">${dow.map((x) => `<span>${x}</span>`).join('')}</div>
@@ -343,7 +385,7 @@ function monthBody(anchor, list) {
       </div>
       <div class="month-list">
         ${list ? `<div class="sec-head"><h2>${esc(D.fmtShort(anchor))}${isToday(anchor) ? ' · Today' : ''}</h2><span class="muted small">${countText(sel.length)}</span></div>
-        ${sel.length ? `<div class="rows">${sel.map(cardSm).join('')}</div>` : emptyMsg('No releases tracked for this day.')}` : loadingBlock()}
+        ${sel.length ? `<div class="rows">${sel.map(cardSm).join('')}</div>` : emptyMsg(emptyFor('on this day'))}` : loadingBlock()}
       </div>
     </div>`;
 }
@@ -438,6 +480,7 @@ async function renderTitle(type, id) {
       </div>
       <div class="btnrow">
         <button class="btn ${saved ? 'btn-ghost on' : 'btn-primary'}" data-action="toggle-watch" data-key="${esc(key)}" aria-pressed="${saved}">${icon.bookmarkSm}${saved ? 'In watchlist' : 'Add to watchlist'}</button>
+        ${date ? `<button class="btn btn-ghost" data-action="export-one">${icon.calAdd}Add to calendar</button>` : ''}
         ${t.link ? `<a class="btn btn-ghost" href="${esc(t.link)}" target="_blank" rel="noopener noreferrer">Where to watch ${icon.ext}</a>` : ''}
       </div>
       ${t.spoken.length ? `<section class="dsec"><h2 class="label">Audio</h2><div class="wrap">${t.spoken.map((l) => `<span class="pill static">${esc(l)}</span>`).join('')}</div></section>` : ''}
@@ -449,7 +492,7 @@ async function renderTitle(type, id) {
       <p><a href="#/admin?prefill=${esc(key)}">Wrong date or platform? Fix it</a></p>
     </div></article>`;
   render(page({ nav: 'releases', body }));
-  state.detailCache = { key, t, rel };
+  state.detailCache = { key, t, rel, date, platforms };
 }
 
 // ---------------------------------------------------------------- filters sheet
@@ -474,7 +517,7 @@ function countForBack(back) {
   if (view === 'week') { from = D.weekStart(anchor); to = D.addDays(from, 6); }
   if (view === 'month') { from = D.monthStart(D.monthKey(anchor)); to = D.monthEnd(D.monthKey(anchor)); }
   const data = collect(D.monthsBetween(from, to), from, to);
-  return data ? applyFilters(data, S.getFilters()).length : null;
+  return data ? applyFilters(data, S.getFilters(), new Set(S.getWatchlist().map((i) => i.key))).length : null;
 }
 
 // ---------------------------------------------------------------- watchlist
@@ -517,8 +560,12 @@ function renderWatchlist() {
       ${perm === 'default' ? '<button class="btn btn-primary small" data-action="enable-reminders">Turn on reminders</button>' : ''}
     </div></div>`;
 
+  const dated = w.filter((i) => i.date).length;
+  const exportBox = w.length ? `<div class="export">
+    <button class="btn btn-ghost small" data-action="export-ics" ${dated ? '' : 'disabled'}>${icon.calAdd}Add to my calendar</button>
+    <span class="small muted">Downloads a calendar file (.ics) with ${dated} dated ${dated === 1 ? 'title' : 'titles'} for Google, Apple or Outlook Calendar. It's a one-time import, so download it again when dates change.</span></div>` : '';
   const body = `<div class="page-head"><h1>Watchlist</h1><p class="muted small">Saved on this device · no login needed</p></div>
-    ${reminder}
+    ${reminder}${exportBox}
     ${w.length ? group('Streaming now', now) + group('Coming soon', soon) + group('No date yet', none)
     : emptyMsg('Nothing saved yet. Open any title and tap "Add to watchlist".')}`;
   render(page({ nav: 'watchlist', body, actions: false }));
@@ -782,7 +829,22 @@ const actions = {
   'toggle-platform': (el) => updateFilters((f) => ({ ...f, platforms: toggle(f.platforms, el.dataset.key) })),
   'chip-all': () => updateFilters((f) => ({ ...f, platforms: [] })),
   'toggle-lang': (el) => updateFilters((f) => ({ ...f, languages: toggle(f.languages, el.dataset.key) })),
-  'set-type': (el) => updateFilters((f) => ({ ...f, type: el.dataset.key })),
+  'set-kind': (el) => updateFilters((f) => ({ ...f, kind: el.dataset.key })),
+  'toggle-mine': () => updateFilters((f) => ({ ...f, mine: !f.mine })),
+  'set-layout': (el) => { S.setLayout(el.dataset.key); rerender(); },
+  'export-ics': () => {
+    const items = S.getWatchlist().filter((i) => i.date);
+    if (!items.length) return;
+    downloadIcs(buildIcs(items.map(toEvent)), 'ott-radar-watchlist.ics');
+    toast(`Calendar file with ${items.length} ${items.length === 1 ? 'title' : 'titles'} downloaded`);
+  },
+  'export-one': () => {
+    const c = state.detailCache;
+    if (!c || !c.date) return;
+    const item = { key: c.key, mediaType: c.t.type, tmdbId: c.t.id, title: c.t.title, date: c.date, status: c.rel?.status || '', platforms: c.platforms };
+    downloadIcs(buildIcs([toEvent(item)]), `${c.t.title.replace(/[^\w-]+/g, '-').slice(0, 40) || 'release'}.ics`);
+    toast('Calendar file downloaded');
+  },
   'toggle-confirmed': (el) => updateFilters((f) => ({ ...f, confirmedOnly: el.checked })),
   'toggle-episodes': (el) => updateFilters((f) => ({ ...f, episodes: el.checked })),
   'reset-filters': () => updateFilters(() => ({ ...S.DEFAULT_FILTERS })),
@@ -846,6 +908,17 @@ const actions = {
     rerender();
   },
 };
+
+function toEvent(i) {
+  const names = (i.platforms || []).map((k) => platformByKey(k)?.name).filter(Boolean).join(', ');
+  return {
+    uid: i.key,
+    date: i.date,
+    summary: `${i.title}${names ? ` · ${names}` : ''}${i.status === 'Expected' ? ' (expected)' : ''}`,
+    description: `${i.title} streams in India${names ? ` on ${names}` : ''}${i.status === 'Expected' ? '. The date is expected, not confirmed' : ''}. From OTT Radar.`,
+    url: i.tmdbId ? `${location.origin}/#/title/${i.mediaType}/${i.tmdbId}` : location.origin,
+  };
+}
 
 function afterManualChange() {
   clearManualCache();

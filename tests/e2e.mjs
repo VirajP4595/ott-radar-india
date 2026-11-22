@@ -2,7 +2,7 @@
 // and replaces TMDB with a mock (so no TMDB token or network is needed).
 // Usage: npm test      (needs `npm install` and Playwright available)
 import { spawn, execSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { createRequire } from 'node:module';
@@ -52,6 +52,7 @@ const SHOWS = {
   201: { name: 'Second Shift', lang: 'hi', prov: [2336], season: 2, eps: [[2, 1, T], [2, 2, addDays(T, 7)]] },
   202: { name: 'Weekly Show', lang: 'en', prov: [8], season: 1, eps: [[1, 1, addDays(T, -14)], [1, 2, addDays(T, -7)], [1, 3, T], [1, 4, addDays(T, 7)]] },
   203: { name: 'Brand New', lang: 'ta', prov: [237], season: 1, eps: [1, 2, 3, 4, 5, 6].map((e) => [1, e, addDays(T, -2)]) },
+  204: { name: 'Last Dance', lang: 'hi', prov: [119], season: 3, eps: [[3, 1, addDays(T, -14)], [3, 2, addDays(T, -7)], [3, 3, T, 'finale']] },
 };
 const provList = (ids) => ({ results: { IN: { link: 'https://www.themoviedb.org/movie/1/watch?locale=IN', flatrate: ids.map((id) => PROVIDERS.find((p) => p.provider_id === id)) } } });
 
@@ -103,7 +104,7 @@ function tmdb(url, headers) {
   }
   if ((m = p.match(/^\/tv\/(\d+)\/season\/(\d+)$/))) {
     const s = SHOWS[m[1]];
-    return [200, { episodes: s.eps.filter(([sn]) => sn === Number(m[2])).map(([sn, e, d]) => ({ season_number: sn, episode_number: e, air_date: d })) }];
+    return [200, { episodes: s.eps.filter(([sn]) => sn === Number(m[2])).map(([sn, e, d, type]) => ({ season_number: sn, episode_number: e, air_date: d, episode_type: type || 'standard' })) }];
   }
   if (p === '/search/multi') {
     const q = (url.searchParams.get('query') || '').toLowerCase();
@@ -202,6 +203,25 @@ async function main() {
     today = await page.locator('.sec').first().innerText();
     check(today.includes('Neelam'), '"All platforms" clears the platform filter');
 
+    console.log('Release-type tabs + layout');
+    today = await page.locator('.sec').first().innerText();
+    check(today.includes('Last Dance') && today.includes('Finale'), 'season finale shows in "All" with a Finale badge');
+    await page.click('button[data-action=set-kind][data-key=premieres]');
+    today = await page.locator('.sec').first().innerText();
+    check(today.includes('Second Shift') && !today.includes('Monsoon Ledger') && !today.includes('Last Dance'), 'Premieres tab shows only premieres');
+    await page.click('button[data-action=set-kind][data-key=finales]');
+    today = await page.locator('.sec').first().innerText();
+    check(today.includes('Last Dance') && !today.includes('Second Shift'), 'Finales tab shows only finales');
+    await page.click('button[data-action=set-kind][data-key=movies]');
+    today = await page.locator('.sec').first().innerText();
+    check(today.includes('Monsoon Ledger') && !today.includes('Second Shift'), 'Movies tab shows only movies');
+    await page.click('button[data-action=set-kind][data-key=all]');
+    await page.click('button[data-action=set-layout][data-key=posters]');
+    check(await page.locator('.sec').first().locator('a.tile').count() >= 4, 'posters layout shows poster tiles');
+    await shot('02b-day-posters');
+    await page.click('button[data-action=set-layout][data-key=list]');
+    check(await page.locator('a.card').count() >= 4, 'list layout restores cards');
+
     console.log('Week + month');
     await page.goto(`${BASE}/#/week/${T}`);
     await page.locator('.week-groups').waitFor();
@@ -243,6 +263,29 @@ async function main() {
     const wl = await page.locator('main').innerText();
     check(wl.includes('Monsoon Ledger') && wl.includes('Out today'), 'watchlist shows the saved title as "Out today"');
     await shot('07-watchlist');
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.click('button[data-action=export-ics]')]);
+    const ics = readFileSync(await dl.path(), 'utf8');
+    check(dl.suggestedFilename() === 'ott-radar-watchlist.ics', 'calendar export downloads ott-radar-watchlist.ics');
+    check(ics.startsWith('BEGIN:VCALENDAR\r\n') && ics.includes(`DTSTART;VALUE=DATE:${T.replace(/-/g, '')}`) && ics.includes('SUMMARY:Monsoon Ledger · Netflix'), 'calendar file has an all-day event with title and platform');
+
+    console.log('My watchlist toggle');
+    await page.goto(`${BASE}/#/day/${T}`);
+    await page.locator('a.card').first().waitFor();
+    check(await page.locator('a.card.is-mine:has-text("Monsoon Ledger")').count() === 1, 'saved title is marked in the day view');
+    await page.click('button[data-action=toggle-mine]');
+    today = await page.locator('.sec').first().innerText();
+    check(today.includes('Monsoon Ledger') && !today.includes('Neelam'), '"My watchlist" shows only saved titles');
+    await page.click('button[data-action=toggle-mine]');
+    await page.goto(`${BASE}/#/month/${T}`);
+    await page.locator('.cal').waitFor();
+    check(await page.locator('.cal-cell.today.has-mine').count() === 1, 'month view marks days with watchlist releases');
+
+    console.log('Calendar file format');
+    const { buildIcs } = await import(path.join(ROOT, 'public/js/ics.js'));
+    const long = buildIcs([{ uid: 'movie:1', date: '2026-12-05', summary: 'एक बहुत लंबा शीर्षक, जिसमें; विशेष अक्षर हैं '.repeat(3), description: 'line1\nline2' }], new Date('2026-11-22T00:00:00Z'));
+    const lines = long.split('\r\n');
+    check(lines.every((l) => Buffer.byteLength(l) <= 75), 'long lines are folded to 75 bytes');
+    check(long.includes('\\,') && long.includes('\\;') && long.includes('line1\\nline2') && long.includes('DTEND;VALUE=DATE:20261206'), 'text is escaped and the event ends the next day');
 
     console.log('Owner: manual entries');
     await page.goto(`${BASE}/#/settings`);
@@ -290,6 +333,10 @@ async function main() {
     check(await page.locator('.sidebar').isVisible(), 'desktop shows the filter sidebar');
     check(!(await page.locator('.bottomnav').isVisible()), 'desktop hides the bottom nav');
     await shot('09-desktop-week');
+    await page.goto(`${BASE}/#/month/${T}`);
+    await page.locator('.cal').waitFor();
+    check(await page.locator('.cal-cell.today .thumbs').isVisible(), 'desktop month shows poster thumbnails in day cells');
+    await shot('10-desktop-month');
 
     const real = errors.filter((e) => !/favicon|Failed to load resource/.test(e));
     check(real.length === 0, `no page errors or CSP violations${real.length ? `:\n    ${real.join('\n    ')}` : ''}`);

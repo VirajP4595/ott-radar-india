@@ -101,13 +101,13 @@ async function tvInfo(tmdb, id) {
 }
 
 async function seasonEpisodes(tmdb, id, n) {
-  const ck = `s:${id}:${n}`;
+  const ck = `s2:${id}:${n}`;
   const c = cacheGet(ck);
   if (c) return c;
   const d = await tmdb.get(`/tv/${id}/season/${n}`);
   const v = (d.episodes || [])
     .filter((e) => e.air_date)
-    .map((e) => ({ s: e.season_number, e: e.episode_number, date: e.air_date }));
+    .map((e) => ({ s: e.season_number, e: e.episode_number, date: e.air_date, type: e.episode_type || '' }));
   cacheSet(ck, v, 12 * H);
   return v;
 }
@@ -116,9 +116,12 @@ function tvLabel(eps) {
   const f = eps[0];
   const l = eps[eps.length - 1];
   const count = eps.length > 1 ? ` · ${eps.length} episodes` : '';
-  if (f.s === 1 && f.e === 1) return { kind: 'series', label: `New series${count}` };
-  if (f.e === 1) return { kind: 'season', label: `Season ${f.s}${count}` };
-  return { kind: 'episode', label: eps.length > 1 ? `S${f.s} E${f.e}–${l.e}` : `S${f.s} E${f.e}` };
+  // TMDB marks episodes as "finale" (season/series) or "mid_season" (mid-season finale).
+  const fin = eps.find((e) => e.type === 'finale') ? 'finale' : eps.find((e) => e.type === 'mid_season') ? 'mid_season' : '';
+  const finText = fin === 'finale' ? ' · Finale' : fin === 'mid_season' ? ' · Mid-season finale' : '';
+  if (f.s === 1 && f.e === 1) return { kind: 'series', label: `New series${count}`, finale: fin };
+  if (f.e === 1) return { kind: 'season', label: `Season ${f.s}${count}`, finale: fin };
+  return { kind: 'episode', label: (eps.length > 1 ? `S${f.s} E${f.e}–${l.e}` : `S${f.s} E${f.e}`) + finText, finale: fin };
 }
 
 async function tvReleases(tmdb, map, id, from, to) {
@@ -134,10 +137,10 @@ async function tvReleases(tmdb, map, id, from, to) {
   }
   return [...byDate.entries()].map(([date, list]) => {
     list.sort((a, b) => a.s - b.s || a.e - b.e);
-    const { kind, label } = tvLabel(list);
+    const { kind, label, finale } = tvLabel(list);
     return {
       id: `tv:${t.id}:${date}`, key: `tv:${t.id}`, mediaType: 'tv', tmdbId: t.id,
-      title: t.title, lang: t.lang, date, platforms, kind, label,
+      title: t.title, lang: t.lang, date, platforms, kind, label, finale,
       poster: t.poster, runtime: t.runtime, genres: t.genres, status: 'Confirmed', source: 'TMDB',
     };
   });
@@ -145,7 +148,7 @@ async function tvReleases(tmdb, map, id, from, to) {
 
 /** All TMDB releases in India for month "YYYY-MM" on tracked platforms. Cached on the device. */
 export async function loadMonth(tmdb, map, mk, onProgress) {
-  const ck = `rel:${mk}`;
+  const ck = `rel2:${mk}`;
   const c = cacheGet(ck);
   if (c) return c;
   const from = D.monthStart(mk);
@@ -193,7 +196,8 @@ function manualToRelease(m) {
     mediaType: tv ? 'tv' : 'movie', tmdbId: m.tmdb_id || null,
     title: m.title, lang: m.original_language || '', date: m.date, platforms: [m.platform],
     kind: tv ? (/^s\d+\s*e\d+/i.test(label) ? 'episode' : label ? 'season' : 'series') : 'movie',
-    label, poster: m.poster_path || '', runtime: 0, genres: [],
+    label, finale: /mid-?season finale/i.test(label) ? 'mid_season' : /finale/i.test(label) ? 'finale' : '',
+    poster: m.poster_path || '', runtime: 0, genres: [],
     status: m.status === 'Confirmed' ? 'Confirmed' : 'Expected', source: 'Manual',
     sourceUrl: m.source_url || '', rank: -1,
   };
@@ -248,11 +252,22 @@ export function mergeReleases(tmdbList, manual) {
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : (a.rank ?? 0) - (b.rank ?? 0)));
 }
 
-export function applyFilters(list, f) {
-  return list.filter((r) =>
-    (!f.platforms.length || r.platforms.some((p) => f.platforms.includes(p)))
-    && (!f.languages.length || f.languages.includes(r.lang))
-    && (f.type === 'all' || r.mediaType === f.type)
-    && (f.episodes || r.kind !== 'episode')
-    && (!f.confirmedOnly || r.status === 'Confirmed'));
+/**
+ * kind: all | premieres (new series + season premieres) | movies | finales.
+ * mine: only titles in the watchlist (their ordinary episodes included).
+ * In "all", ordinary episodes are hidden unless f.episodes is on; finales always show.
+ */
+export function applyFilters(list, f, watchKeys = new Set()) {
+  return list.filter((r) => {
+    if (f.mine && !watchKeys.has(r.key)) return false;
+    if (f.platforms.length && !r.platforms.some((p) => f.platforms.includes(p))) return false;
+    if (f.languages.length && !f.languages.includes(r.lang)) return false;
+    if (f.confirmedOnly && r.status !== 'Confirmed') return false;
+    switch (f.kind) {
+      case 'premieres': return r.kind === 'series' || r.kind === 'season';
+      case 'movies': return r.mediaType === 'movie';
+      case 'finales': return !!r.finale;
+      default: return f.mine || f.episodes || r.kind !== 'episode' || !!r.finale;
+    }
+  });
 }
