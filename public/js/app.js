@@ -5,6 +5,7 @@ import { PLATFORMS, platformByKey, keyForText, loadProviderMap } from './platfor
 import { loadMonth, fetchManual, fetchExternal, enrichExternal, clearManualCache, mergeReleases, applyFilters } from './releases.js';
 import { esc, initials, tintClass, langName, fmtRuntime, icon, FILTER_LANGS, langsInText, uniq } from './ui.js';
 import { buildIcs, downloadIcs } from './ics.js';
+import { refreshExtra, upsertRows, testMotnKey, testWatchmodeKey } from './extsources.js';
 
 const H = 3600e3;
 const $app = document.getElementById('app');
@@ -74,7 +75,7 @@ function ensureMonth(mk) {
   if (state.loading.has(mk)) return state.loading.get(mk);
   const p = (async () => {
     const manualP = fetchManual(D.monthStart(mk), D.monthEnd(mk));
-    const extP = fetchExternal(D.monthStart(mk), D.monthEnd(mk));
+    const extP = fetchExternal(D.monthStart(mk), D.monthEnd(mk), S.getExtRows());
     let list = [];
     if (state.tmdb && !state.authError) {
       try {
@@ -236,7 +237,12 @@ function navLinks(active, cls) {
 
 function headerActions() {
   const back = encodeURIComponent(location.hash || '#/');
-  return `<a class="iconbtn" href="#/search" aria-label="Search titles">${icon.search}</a>
+  const k = S.getExtKeys();
+  const title = k.motn || k.watchmode
+    ? 'Refresh: reload from TMDB and fetch the extra sources now (uses up to 14 of your monthly Movie of the Night requests)'
+    : 'Refresh: reload releases from TMDB';
+  return `<button class="iconbtn ${state.extRefreshing ? 'spin' : ''}" data-action="refresh-all" aria-label="Refresh releases" title="${esc(title)}" ${state.extRefreshing ? 'disabled' : ''}>${icon.refresh}</button>
+    <a class="iconbtn" href="#/search" aria-label="Search titles">${icon.search}</a>
     <a class="iconbtn" href="#/filters?back=${back}" aria-label="Filters">${icon.filter}${S.filtersActive() ? '<span class="badge-dot"></span>' : ''}</a>`;
 }
 
@@ -670,22 +676,96 @@ async function checkReminders() {
 }
 
 // ---------------------------------------------------------------- settings
-function syncText() {
-  const s = state.syncStatus;
-  if (!s) return '<p class="small muted">Extra sources: checking…</p>';
-  const names = { motn_upcoming: 'Streaming Availability · upcoming', motn_new: 'Streaming Availability · new', watchmode: 'Watchmode' };
-  const keys = `Keys on the server: Streaming Availability ${s.sources?.motn ? '✓' : '✗'} · Watchmode ${s.sources?.watchmode ? '✓' : '✗'}`;
-  if (!s.last) return `<p class="small muted">${keys}<br>Extra sources haven't synced yet. They sync daily at 06:00 IST.</p>`;
-  const when = new Date(s.last.at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-  const lines = Object.entries(s.last.sources || {}).map(([k, v]) => `${esc(names[k] || k)}: ${v.ok ? `${v.rows} titles` : `failed (${esc(v.error)})`}`);
-  return `<p class="small muted">${keys}<br>Last sync ${esc(when)}${lines.length ? `<br>${lines.join('<br>')}` : ''}</p>`;
+function fmtWhen(t) {
+  return new Date(t).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+function summaryLines(summary) {
+  const names = { motn_upcoming: 'Movie of the Night · announced', motn_new: 'Movie of the Night · newly added', watchmode: 'Watchmode' };
+  return Object.entries((summary && summary.sources) || {})
+    .map(([k, v]) => `${esc(names[k] || k)}: ${v.rows} titles${v.requests ? ` (${v.requests} requests)` : ''}${v.ok ? '' : ` · ${esc(v.error || 'failed')}`}`);
 }
 async function loadSyncStatus() {
   try { state.syncStatus = await (await fetch('/api/sync')).json(); } catch { state.syncStatus = { last: null }; }
+  return state.syncStatus;
+}
+
+/**
+ * Fetch the extra sources with this browser's keys. Runs ONLY when the user presses Refresh
+ * (no automatic or daily runs), so every request against the free quota is the user's choice.
+ */
+async function refreshExtraNow() {
+  const keys = S.getExtKeys();
+  if ((!keys.motn && !keys.watchmode) || state.extRefreshing) return;
+  state.extRefreshing = true;
+  state.extProgress = 'Starting…';
+  rerenderLight();
+  try {
+    const { rows, summary } = await refreshExtra(keys, (msg) => {
+      state.extProgress = msg;
+      const el = document.getElementById('ext-progress');
+      if (el) el.textContent = msg;
+    });
+    S.setExtRows(upsertRows(S.getExtRows(), rows, D.today()));
+    S.setExtState({ at: Date.now(), summary });
+    if (S.getAdminToken() && rows.length) {
+      // Share the results (never the keys) so visitors without keys get them too.
+      try {
+        const r = await adminFetch('/api/external', { method: 'PUT', body: JSON.stringify({ rows, summary }) });
+        state.syncStatus = { last: r.last };
+      } catch (e) {
+        state.extError = `Fetched, but sharing with the site failed: ${e.message}`;
+      }
+    }
+    S.cacheRemovePrefix('ext:');
+    state.months.clear();
+    toast(`Extra sources refreshed: ${rows.length} titles`);
+  } catch (e) {
+    state.extError = e.message;
+  } finally {
+    state.extRefreshing = false;
+    state.extProgress = '';
+    rerenderLight();
+  }
+}
+// Redraw without losing what the user is doing (skip pages with forms being typed into).
+function rerenderLight() {
+  const h = location.hash;
+  if (h.startsWith('#/admin') || h.startsWith('#/search')) return;
+  rerender();
+}
+
+function extraSourcesPanel() {
+  const k = S.getExtKeys();
+  const st = S.getExtState();
+  const keyRow = (name, label, host, signup) => (k[name]
+    ? `<div class="keyrow"><span><strong>${label}</strong><span class="muted small">Key ending <code>••••${esc(k[name].slice(-4))}</code> · sent only to ${host}</span></span>
+        <button class="btn btn-ghost small" data-action="remove-extkey" data-key="${name}">Remove</button></div>`
+    : `<form class="row-form" data-form="extkey" data-key="${name}" autocomplete="off"><label class="field grow"><span>${label} key <a href="${signup}" target="_blank" rel="noopener noreferrer">get a free key</a></span>
+        <input name="key" type="password" required minlength="8" maxlength="200" spellcheck="false" autocapitalize="off"></label><button class="btn btn-ghost" type="submit">Test and save</button></form>`);
+  const lines = summaryLines(st.summary);
+  return `<section class="panel" id="extra-sources">
+    <div class="panel-head"><h2>Extra sources</h2><span class="muted small">Optional</span></div>
+    <p class="small muted">TMDB misses many India dates. These add titles <strong>announced</strong> or <strong>newly added</strong> on Netflix, Prime Video, JioHotstar, ZEE5, SonyLIV and Apple TV+ in India, with their dubbed languages. Keys stay in this browser, like your TMDB token.</p>
+    ${keyRow('motn', 'Movie of the Night', 'api.movieofthenight.com', 'https://www.movieofthenight.com/about/api')}
+    ${keyRow('watchmode', 'Watchmode', 'api.watchmode.com', 'https://api.watchmode.com/')}
+    ${state.extKeyError ? `<p class="error" role="alert">${esc(state.extKeyError)}</p>` : ''}
+    ${k.motn || k.watchmode ? `<div class="sync">
+      <p class="small muted">${state.extRefreshing ? `<span id="ext-progress">${esc(state.extProgress || 'Refreshing…')}</span>`
+    : st.at ? `Last refreshed on this device: ${esc(fmtWhen(st.at))}${lines.length ? `<br>${lines.join('<br>')}` : ''}` : 'Not refreshed yet on this device.'}</p>
+      ${state.extError ? `<p class="error">${esc(state.extError)}</p>` : ''}
+      <button class="btn btn-ghost small" data-action="refresh-extra" ${state.extRefreshing ? 'disabled' : ''}>${state.extRefreshing ? 'Refreshing…' : 'Refresh now'}</button>
+      <p class="small muted">Runs only when you press Refresh (here or the ⟳ button at the top). Each refresh uses up to 14 Movie of the Night requests (free plan: 1,000 a month) and 1 Watchmode request.</p></div>` : ''}
+  </section>`;
+}
+function sharedStatusText() {
+  const s = state.syncStatus;
+  if (!s) return '<p class="small muted">Shared extra-source results: checking…</p>';
+  if (!s.last) return '<p class="small muted">No extra-source results shared yet. Save your Movie of the Night / Watchmode keys under Extra sources; your next refresh shares the results (not the keys) with everyone.</p>';
+  return `<p class="small muted">Shared extra-source results: ${s.last.rows} titles, last shared ${esc(fmtWhen(s.last.at))}. Your refreshes share results automatically; your keys stay in this browser.</p>`;
 }
 
 function renderSettings() {
-  if (S.getAdminToken() && !state.syncStatus && !state.loadingSync) {
+  if (!state.syncStatus && !state.loadingSync) {
     state.loadingSync = true;
     loadSyncStatus().then(() => { state.loadingSync = false; if (location.hash.startsWith('#/settings')) rerender(); });
   }
@@ -727,6 +807,7 @@ function renderSettings() {
       ${editing ? form : connected}
       <div class="note">${icon.lock}<span class="small">Your token is saved only in this browser and sent only to api.themoviedb.org. OTT Radar's server never sees it. Clearing your browser data removes it.</span></div>
     </section>
+    ${extraSourcesPanel()}
     <section class="panel" id="my-services">
       <div class="panel-head"><h2>My streaming services</h2><span class="muted small">${my.length ? `${my.length} of ${PLATFORMS.length} selected` : 'All services shown'}</span></div>
       <p class="small muted">Only releases on the services you tick appear anywhere in OTT Radar. Leave everything unticked to see all of them.</p>
@@ -754,7 +835,7 @@ function renderSettings() {
       <div class="panel-head"><h2>Owner tools</h2>${admin ? '<span class="status ok">Unlocked</span>' : ''}</div>
       <p class="small muted">Only the site owner has the admin token. It lets you add release dates TMDB doesn't have yet. Everyone else can ignore this.</p>
       ${admin ? `<div class="btnrow"><a class="btn btn-primary grow" href="#/admin">Add a release manually</a><button class="btn btn-ghost" data-action="remove-admin">Lock</button></div>
-      <div class="sync">${syncText()}<button class="btn btn-ghost small" data-action="sync-now" ${state.syncing ? 'disabled' : ''}>${state.syncing ? 'Syncing…' : 'Sync extra sources now'}</button></div>`
+      <div class="sync">${sharedStatusText()}</div>`
     : `<form class="row-form" data-form="admin-token" autocomplete="off"><label class="field grow"><span>Admin token</span><input name="admin" type="password" required minlength="8" maxlength="200"></label><button class="btn btn-ghost" type="submit">Unlock</button></form>`}
     </section>
     <p class="attribution small muted">Data from <a href="https://www.themoviedb.org/" target="_blank" rel="noopener noreferrer">TMDB</a>. This product uses the TMDB API but is not endorsed or certified by TMDB. Streaming availability data is provided by JustWatch through TMDB.</p>`;
@@ -1029,19 +1110,29 @@ const actions = {
     toast('Token removed from this device');
     rerender();
   },
-  'sync-now': async () => {
-    state.syncing = true;
+  'refresh-extra': () => { state.extError = ''; refreshExtraNow(); },
+  'refresh-all': () => {
+    S.cacheRemovePrefix('rel');
+    S.cacheRemovePrefix('ext:');
+    S.cacheRemovePrefix('man:');
+    resetData();
+    const k = S.getExtKeys();
+    if (k.motn || k.watchmode) {
+      state.extError = '';
+      refreshExtraNow();
+      toast('Reloading TMDB and fetching extra sources…');
+    } else toast('Reloading from TMDB…');
     rerender();
-    try {
-      const r = await adminFetch('/api/sync', { method: 'POST' });
-      state.syncStatus = { ...(state.syncStatus || {}), last: r };
-      S.cacheRemovePrefix('ext:');
+  },
+  'remove-extkey': (el) => {
+    S.setExtKey(el.dataset.key, '');
+    const k = S.getExtKeys();
+    if (!k.motn && !k.watchmode) {
+      S.setExtRows([]);
+      S.setExtState({ at: 0, summary: null });
       state.months.clear();
-      toast('Extra sources synced');
-    } catch (e) {
-      toast(e.message);
     }
-    state.syncing = false;
+    toast('Key removed from this device');
     rerender();
   },
   'remove-admin': () => { S.clearAdminToken(); rerender(); },
@@ -1107,6 +1198,23 @@ const forms = {
       location.hash = '#/';
     } catch (e) {
       state.tokenError = e.message;
+      rerender();
+    }
+  },
+  extkey: async (form) => {
+    const name = form.dataset.key;
+    const key = form.key.value.trim();
+    const btn = form.querySelector('[type=submit]');
+    btn.disabled = true;
+    btn.textContent = 'Testing…';
+    try {
+      await (name === 'motn' ? testMotnKey(key) : testWatchmodeKey(key));
+      S.setExtKey(name, key);
+      state.extKeyError = '';
+      toast('Key saved on this device. Press "Refresh now" to fetch.');
+      rerender();
+    } catch (e) {
+      state.extKeyError = e.message;
       rerender();
     }
   },

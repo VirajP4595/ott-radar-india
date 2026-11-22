@@ -304,19 +304,23 @@ function extToRelease(row) {
   };
 }
 
-export async function fetchExternal(from, to) {
+/** Shared rows from the site (uploaded by the owner) + rows this browser fetched with its own keys. */
+export async function fetchExternal(from, to, localRows = []) {
   const ck = `ext:${from}:${to}`;
-  const c = cacheGet(ck);
-  if (c) return c;
-  try {
-    const res = await fetch(`/api/external?from=${from}&to=${to}`, { headers: { accept: 'application/json' } });
-    if (!res.ok) return [];
-    const list = ((await res.json()).entries || []).map(extToRelease);
-    cacheSet(ck, list, 30 * 60e3);
-    return list;
-  } catch {
-    return [];
+  let shared = cacheGet(ck);
+  if (!shared) {
+    try {
+      const res = await fetch(`/api/external?from=${from}&to=${to}`, { headers: { accept: 'application/json' } });
+      shared = res.ok ? (await res.json()).entries || [] : [];
+      cacheSet(ck, shared, 30 * 60e3);
+    } catch {
+      shared = [];
+    }
   }
+  const pk = (r) => `${r.source}|${r.media_type}|${r.tmdb_id}|${r.platform}`;
+  const rows = new Map(shared.map((r) => [pk(r), r]));
+  for (const r of localRows) if (r.date >= from && r.date <= to) rows.set(pk(r), r); // this device's own fetch wins
+  return [...rows.values()].map(extToRelease);
 }
 
 /**

@@ -1,11 +1,11 @@
 // Service worker: offline app shell + cached TMDB images. TMDB API calls are NOT cached here
 // (the app caches trimmed results itself), and /api/* always goes to the network.
-const VERSION = 'v7';
+const VERSION = 'v8';
 const SHELL = `shell-${VERSION}`;
 const IMAGES = 'tmdb-img-v1';
 const SHELL_FILES = [
   '/', '/index.html', '/css/app.css', '/manifest.webmanifest',
-  '/js/app.js', '/js/store.js', '/js/dates.js', '/js/tmdb.js', '/js/platforms.js', '/js/releases.js', '/js/ui.js', '/js/ics.js',
+  '/js/app.js', '/js/store.js', '/js/dates.js', '/js/tmdb.js', '/js/platforms.js', '/js/releases.js', '/js/ui.js', '/js/ics.js', '/js/extsources.js',
   '/icons/icon.svg', '/icons/icon-192.png', '/icons/icon-512.png',
 ];
 

@@ -404,3 +404,8 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(-
 .p-unknown { background: #6B7480; }
 .sync { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; border-top: 1px solid var(--line); }
 .sync p { margin: 8px 0 0; line-height: 1.6; }
+.keyrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 12px; border-radius: 10px; background: var(--bg); }
+.keyrow > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.iconbtn.spin svg { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .iconbtn.spin svg { animation: none; } }

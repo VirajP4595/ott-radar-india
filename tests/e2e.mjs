@@ -2,7 +2,6 @@
 // and replaces TMDB with a mock (so no TMDB token or network is needed).
 // Usage: npm test      (needs `npm install` and Playwright available)
 import { spawn, execSync } from 'node:child_process';
-import { createServer } from 'node:http';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -131,7 +130,6 @@ function tmdb(url, headers) {
 }
 
 // ---------- mock Movie of the Night + Watchmode (called by the Worker during /api/sync)
-const EXT_PORT = 8792;
 const istTs = (d) => Date.parse(`${d}T00:00:00+05:30`) / 1000;
 const THIS_YEAR = Number(T.slice(0, 4));
 const motnShow = (tmdbId, title, year, audios = [], svc = 'netflix') => ({
@@ -163,29 +161,46 @@ const WATCHMODE = [
   { title: 'Global Original', source_name: 'Netflix', source_release_date: T, tmdb_id: 108, tmdb_type: 'movie' }, // duplicate row
   { title: 'US Only Show', source_name: 'Prime Video', source_release_date: T, tmdb_id: 230, tmdb_type: 'tv' },
 ];
-function startExtMock() {
-  return new Promise((ok) => {
-    const srv = createServer((req, res) => {
-      const u = new URL(req.url, 'http://x');
-      let body = { error: 'no route' };
-      if (req.headers['x-api-key'] !== 'test-key') body = { error: 'bad key' };
-      else if (u.pathname === '/motn/v4/changes') {
-        const svc = CATALOG_SERVICE[u.searchParams.get('catalogs')];
-        const changes = (MOTN_CHANGES[u.searchParams.get('change_type')] || []).filter((c) => c.service.id === svc);
-        body = { changes, shows: Object.fromEntries(changes.map((c) => [c.showId, MOTN_SHOWS[c.showId]])), hasMore: false };
-      }
-      else if (u.pathname === '/wm/v1/releases/') body = { releases: WATCHMODE };
-      res.writeHead(body.error ? 404 : 200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(body));
-    });
-    srv.listen(EXT_PORT, () => ok(srv));
-  });
+// Requests the browser makes to the extra sources (to check quota behaviour).
+const extCalls = { motn: 0, watchmode: 0 };
+function extSourceRoute(route) {
+  const req = route.request();
+  const u = new URL(req.url());
+  const cors = { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'x-api-key, accept' };
+  if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: cors });
+  const key = req.headers()['x-api-key'];
+  const send = (status, body) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body), headers: cors });
+  if (u.host === 'api.movieofthenight.com') {
+    if (key !== 'test-motn-key') return send(401, { message: 'bad key' });
+    if (u.pathname === '/v4/countries/in') return send(200, { name: 'India', services: [] });
+    if (u.pathname === '/v4/changes') {
+      extCalls.motn++;
+      const svc = CATALOG_SERVICE[u.searchParams.get('catalogs')];
+      const changes = (MOTN_CHANGES[u.searchParams.get('change_type')] || []).filter((c) => c.service.id === svc);
+      return send(200, { changes, shows: Object.fromEntries(changes.map((c) => [c.showId, MOTN_SHOWS[c.showId]])), hasMore: false });
+    }
+  }
+  if (u.host === 'api.watchmode.com') {
+    if (key !== 'test-wm-key') return send(401, { message: 'bad key' });
+    if (u.pathname === '/v1/regions/') return send(200, [{ country: 'IN' }]);
+    if (u.pathname === '/v1/releases/') { extCalls.watchmode++; return send(200, { releases: WATCHMODE }); }
+  }
+  return send(404, { message: 'mock: no route' });
 }
 
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
 
 // ---------- test harness
 let failures = 0;
+/** Poll an async condition from Node (Playwright's waitForFunction treats a returned Promise as truthy). */
+async function waitUntil(fn, timeoutMs = 20000) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    try { if (await fn()) return true; } catch { /* retry */ }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
 function check(cond, msg) {
   if (cond) console.log(`  ok  ${msg}`);
   else { failures++; console.log(`  FAIL ${msg}`); }
@@ -202,12 +217,10 @@ async function waitForServer() {
 async function main() {
   execSync('npx wrangler d1 execute ott-radar-india --local --file schema.sql', { cwd: ROOT, stdio: 'ignore' });
   execSync('npx wrangler d1 execute ott-radar-india --local --command "DELETE FROM manual"', { cwd: ROOT, stdio: 'ignore' });
-  execSync('npx wrangler d1 execute ott-radar-india --local --command "DROP TABLE IF EXISTS ext_releases; DELETE FROM meta WHERE k = \'last_sync\'"', { cwd: ROOT, stdio: 'ignore' });
-  const extMock = await startExtMock();
-  const server = spawn('npx', ['wrangler', 'dev', '--port', String(PORT), '--var', `ADMIN_TOKEN:${ADMIN}`,
-    '--var', `MOTN_BASE:http://localhost:${EXT_PORT}/motn/v4`, '--var', 'MOTN_API_KEY:test-key',
-    '--var', `WATCHMODE_BASE:http://localhost:${EXT_PORT}/wm/v1`, '--var', 'WATCHMODE_API_KEY:test-key'], { cwd: ROOT, stdio: 'ignore', detached: true });
-  const stop = () => { try { process.kill(-server.pid); } catch { /* gone */ } extMock.close(); };
+  execSync('npx wrangler d1 execute ott-radar-india --local --command "DROP TABLE IF EXISTS ext_releases"', { cwd: ROOT, stdio: 'ignore' });
+  execSync('npx wrangler d1 execute ott-radar-india --local --command "DROP TABLE IF EXISTS meta"', { cwd: ROOT, stdio: 'ignore' });
+  const server = spawn('npx', ['wrangler', 'dev', '--port', String(PORT), '--var', `ADMIN_TOKEN:${ADMIN}`], { cwd: ROOT, stdio: 'ignore', detached: true });
+  const stop = () => { try { process.kill(-server.pid); } catch { /* gone */ } };
   process.on('exit', stop);
   try {
     await waitForServer();
@@ -253,6 +266,7 @@ async function main() {
       await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body), headers: { 'access-control-allow-origin': '*', 'access-control-allow-headers': 'authorization, accept' } });
     });
     await ctx.route('https://image.tmdb.org/**', (route) => route.fulfill({ status: 200, contentType: 'image/png', body: PNG }));
+    await ctx.route(/^https:\/\/api\.(movieofthenight|watchmode)\.com\//, extSourceRoute);
     await ctx.route(/fonts\.(googleapis|gstatic)\.com/, (route) => route.fulfill({ status: 200, contentType: 'text/css', body: '' }));
     const page = await ctx.newPage();
     page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`));
@@ -292,19 +306,37 @@ async function main() {
     check(!day.includes('Tiny Short'), 'short films / test entries are not shown as Platform TBA');
     check(!day.includes('Old Classic'), "an old film added in just one other country isn't treated as a new India release");
 
-    console.log('Extra sources (Movie of the Night India + Watchmode, synced on the server)');
-    r = await fetch(`${BASE}/api/sync`, { method: 'POST' });
-    check(r.status === 401, 'running the sync needs the admin token');
-    r = await fetch(`${BASE}/api/sync`, { method: 'POST', headers: { authorization: `Bearer ${ADMIN}` } });
-    const sum = await r.json();
-    check(sum.sources?.motn_upcoming?.rows === 8 && sum.sources?.motn_new?.rows === 2 && sum.sources?.watchmode?.rows === 3 && sum.sources?.motn_upcoming?.requests === 6,
-      `sync stores upcoming + new (old catalogue filtered) + Watchmode rows [${JSON.stringify(sum.sources)}]`);
-    const ext = await (await fetch(`${BASE}/api/external?from=${addDays(T, -3)}&to=${addDays(T, 3)}`)).json();
-    check(ext.entries.length === 10, `rows are stored once per title + service (duplicates in a feed and across feeds collapse) (${ext.entries.length})`);
-    check(ext.entries.filter((e) => e.tmdb_id === 121).length === 1 && ext.entries.find((e) => e.tmdb_id === 121).date === addDays(T, -1), 'title in both "upcoming" and "new" keeps one row with the actual arrival date');
-    await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('ottr:c:ext:')).forEach((k) => localStorage.removeItem(k)));
+    console.log('Extra sources (keys saved in the browser, like TMDB)');
+    await page.goto(`${BASE}/#/settings`);
+    await page.fill('form[data-key=motn] input[name=key]', 'wrong-key-123');
+    await page.click('form[data-key=motn] button[type=submit]');
+    await page.getByText('Movie of the Night rejected the key').waitFor();
+    check(true, 'a wrong Movie of the Night key is rejected before saving');
+    await page.fill('form[data-key=motn] input[name=key]', 'test-motn-key');
+    await page.click('form[data-key=motn] button[type=submit]');
+    await page.getByText('Not refreshed yet on this device').waitFor();
+    await page.fill('form[data-key=watchmode] input[name=key]', 'test-wm-key');
+    await page.click('form[data-key=watchmode] button[type=submit]');
+    await page.locator('button[data-action=refresh-extra]').waitFor();
+    await page.reload();
+    await page.waitForTimeout(800);
+    check(extCalls.motn === 0 && extCalls.watchmode === 0, 'saving keys or reloading makes NO requests (refresh is manual only)');
+    await page.click('button[data-action=refresh-extra]');
+    await page.waitForFunction(() => document.body.innerText.includes('Watchmode: 3 titles'), null, { timeout: 20000 });
+    await page.click('button[data-action=refresh-extra]');
+    await page.waitForFunction(() => document.body.innerText.includes('Watchmode: 3 titles') && !document.body.innerText.includes('Refreshing…'), null, { timeout: 20000 });
+    const stored = await page.evaluate(() => ({ keys: localStorage.getItem('ottr:extKeys'), rows: JSON.parse(localStorage.getItem('ottr:extRows') || '[]') }));
+    check(stored.keys.includes('test-motn-key') && stored.keys.includes('test-wm-key'), 'both keys are saved in this browser only');
+    check(stored.rows.length === 11, `fetched rows are stored once per title + service, even after two refreshes and a duplicate Watchmode row (${stored.rows.length})`);
+    check(stored.rows.filter((e) => e.tmdb_id === 121).length === 1 && stored.rows.find((e) => e.tmdb_id === 121).date === addDays(T, -1),
+      'title in both "upcoming" and "new" keeps one row with the actual arrival date');
+    check(extCalls.motn === 24, `one request per service per feed, no paging when there is no more (${extCalls.motn} for two refreshes)`);
+    const callsBefore = extCalls.motn;
+    await page.goto(`${BASE}/#/day/${T}`);
     await page.reload();
     await page.locator('a.card').first().waitFor();
+    await page.waitForTimeout(800);
+    check(extCalls.motn === callsBefore, 'opening the app later makes no extra-source requests');
     let dayX = await page.locator('main').innerText();
     check(/Drishyam Test[\s\S]*?Netflix/.test((await page.locator('a.card:has-text("Drishyam Test")').innerText())), '"Platform TBA" title gets its service from the India listing (Netflix)');
     check(dayX.includes('US Only Show') && (await page.locator('a.card:has-text("US Only Show")').innerText()).includes('Likely date'), 'Watchmode-only title appears with a "Likely date"');
@@ -466,7 +498,7 @@ async function main() {
     await page.goto(`${BASE}/#/settings`);
     await page.fill('input[name=admin]', ADMIN);
     await page.click('button:has-text("Unlock")');
-    await page.waitForFunction(async () => Object.keys((await (await fetch('/api/logos')).json()).logos).length > 0, null, { timeout: 10000 }).catch(() => {});
+    await waitUntil(async () => Object.keys((await (await fetch(`${BASE}/api/logos`)).json()).logos).length > 0);
     const shared = await (await fetch(`${BASE}/api/logos`)).json();
     check(shared.logos.netflix === '/logo8.png' && shared.logos.prime === '/logo119.png', "owner's browser shares TMDB's official logos with the site");
     r = await fetch(`${BASE}/api/logos`, { method: 'PUT', body: JSON.stringify({ logos: { netflix: '/x.png' } }) });
@@ -481,6 +513,32 @@ async function main() {
       await vp.screenshot({ path: path.join(OUT, '11-visitor-logos.png') });
       await vctx.close();
     }
+    console.log('Sharing extra-source results (owner)');
+    r = await fetch(`${BASE}/api/external`, { method: 'PUT', body: JSON.stringify({ rows: [] }) });
+    check(r.status === 401, 'uploading shared results needs the admin token');
+    await page.goto(`${BASE}/#/settings`);
+    await page.click('button[data-action=refresh-extra]');
+    await waitUntil(async () => ((await (await fetch(`${BASE}/api/external?from=${addDays(T, -3)}&to=${addDays(T, 3)}`)).json()).entries || []).length >= 10);
+    const sharedExt = await (await fetch(`${BASE}/api/external?from=${addDays(T, -3)}&to=${addDays(T, 3)}`)).json();
+    check(sharedExt.entries.length === 10, `owner's refresh shares the rows with the site (${sharedExt.entries.length}); keys are not sent`);
+    const syncInfo = await (await fetch(`${BASE}/api/sync`)).json();
+    check(!JSON.stringify(syncInfo).includes('test-motn-key') && !JSON.stringify(sharedExt).includes('test-motn-key'), 'the key never appears in anything the server stores');
+    {
+      const vctx = await browser.newContext({ viewport: { width: 390, height: 844 }, serviceWorkers: 'block', timezoneId: TZ });
+      await vctx.route(/^https:\/\/api\.(movieofthenight|watchmode)\.com\//, (route) => { extCalls.visitor = (extCalls.visitor || 0) + 1; return route.abort(); });
+      const vp = await vctx.newPage();
+      await vp.goto(`${BASE}/#/day/${T}`);
+      await vp.getByText('Two Service Film').first().waitFor({ timeout: 15000 });
+      const vcard = await vp.locator('a.card:has-text("Two Service Film")').innerText();
+      check(vcard.includes('Netflix') && vcard.includes('Prime Video'), 'a visitor with NO keys (and no TMDB token) sees the shared extra-source releases');
+      check(!extCalls.visitor, "the visitor's browser makes no calls to the extra sources");
+      await vctx.close();
+    }
+    const beforeAll = extCalls.motn;
+    await page.goto(`${BASE}/#/day/${T}`);
+    await page.click('button[data-action=refresh-all]');
+    check(await waitUntil(() => extCalls.motn > beforeAll),  'the Refresh button reloads TMDB and fetches the extra sources right away');
+
     await page.goto(`${BASE}/#/admin`);
     await page.fill('form[data-form=tmdb-search] input[name=q]', 'Kaaval');
     await page.click('form[data-form=tmdb-search] button');

@@ -13,9 +13,5 @@ binding = "DB"
 database_name = "ott-radar-india"
 database_id = "26346838-24be-4962-819a-efe73094536e"
 
-# Daily sync of extra release sources at 06:00 IST (00:30 UTC).
-[triggers]
-crons = ["30 0 * * *"]
-
 [observability]
 enabled = true

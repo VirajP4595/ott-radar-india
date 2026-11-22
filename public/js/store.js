@@ -63,6 +63,24 @@ export const getMyLanguages = () => {
 };
 export const setMyLanguages = (v) => write('myLanguages', v);
 
+// ---- Extra sources: keys (this browser only) and the rows fetched with them
+export const getExtKeys = () => {
+  const k = read('extKeys', {});
+  return { motn: typeof k.motn === 'string' ? k.motn : '', watchmode: typeof k.watchmode === 'string' ? k.watchmode : '' };
+};
+export const setExtKey = (name, value) => {
+  const k = getExtKeys();
+  k[name] = value;
+  write('extKeys', k);
+};
+export const getExtRows = () => {
+  const v = read('extRows', []);
+  return Array.isArray(v) ? v : [];
+};
+export const setExtRows = (rows) => write('extRows', rows);
+export const getExtState = () => read('extState', { at: 0, summary: null });
+export const setExtState = (s) => write('extState', s);
+
 // ---- Layout: "list" or "posters"
 export const getLayout = () => (read('layout', 'list') === 'posters' ? 'posters' : 'list');
 export const setLayout = (v) => write('layout', v === 'posters' ? 'posters' : 'list');
