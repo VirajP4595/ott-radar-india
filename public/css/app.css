@@ -402,3 +402,5 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(-
 .pill.check input { accent-color: var(--accent); width: 16px; height: 16px; margin: 0; }
 .pill.check:has(input:checked) { border-color: var(--accent); color: var(--accent); background: var(--accent-bg); }
 .p-unknown { background: #6B7480; }
+.sync { display: flex; flex-direction: column; gap: 8px; padding-top: 4px; border-top: 1px solid var(--line); }
+.sync p { margin: 8px 0 0; line-height: 1.6; }

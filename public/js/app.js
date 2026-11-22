@@ -2,7 +2,7 @@ import * as S from './store.js';
 import * as D from './dates.js';
 import { Tmdb, img } from './tmdb.js';
 import { PLATFORMS, platformByKey, keyForText, loadProviderMap } from './platforms.js';
-import { loadMonth, fetchManual, clearManualCache, mergeReleases, applyFilters } from './releases.js';
+import { loadMonth, fetchManual, fetchExternal, enrichExternal, clearManualCache, mergeReleases, applyFilters } from './releases.js';
 import { esc, initials, tintClass, langName, fmtRuntime, icon, FILTER_LANGS, langsInText, uniq } from './ui.js';
 import { buildIcs, downloadIcs } from './ics.js';
 
@@ -74,6 +74,7 @@ function ensureMonth(mk) {
   if (state.loading.has(mk)) return state.loading.get(mk);
   const p = (async () => {
     const manualP = fetchManual(D.monthStart(mk), D.monthEnd(mk));
+    const extP = fetchExternal(D.monthStart(mk), D.monthEnd(mk));
     let list = [];
     if (state.tmdb && !state.authError) {
       try {
@@ -85,7 +86,8 @@ function ensureMonth(mk) {
         else state.netError = e.message || 'Something went wrong while loading from TMDB.';
       }
     }
-    const merged = mergeReleases(list, await manualP);
+    const merged = mergeReleases(list, await manualP, await extP);
+    if (state.tmdb && !state.authError) await enrichExternal(state.tmdb, merged);
     state.months.set(mk, merged);
     state.loading.delete(mk);
     state.progress = null;
@@ -165,8 +167,9 @@ function statusTag(r) {
   if (r.status === 'Likely') return '<span class="status warn" title="No India date on TMDB; date taken from another country where the same service released it">Likely date</span>';
   return `<span class="status ${r.status === 'Confirmed' ? 'ok' : 'warn'}">${esc(r.status)}</span>`;
 }
+const extImg = (u) => (typeof u === 'string' && /^https:\/\/cdn\.movieofthenight\.com\/[^"'<>\s]+$/.test(u) ? u : '');
 function posterBox(r, size) {
-  const src = img(r.poster, size);
+  const src = img(r.poster, size) || extImg(r.posterUrl);
   return `<div class="poster ${tintClass(r.title)}" aria-hidden="true">${src ? `<img src="${src}" alt="" loading="lazy">` : `<span>${esc(initials(r.title))}</span>`}</div>`;
 }
 const titleHref = (r) => (r.tmdbId ? `#/title/${r.mediaType}/${r.tmdbId}` : '#/');
@@ -531,7 +534,10 @@ async function renderTitle(type, id) {
   const gap = type === 'movie' && t.theatrical && date && D.daysBetween(t.theatrical, date) > 0
     ? `<span class="muted small">In theatres ${esc(D.fmtDate(t.theatrical))} · came to OTT ${D.daysBetween(t.theatrical, date)} days later</span>` : '';
   const source = rel
-    ? `<span class="muted small">Date source: ${rel.source === 'Manual' ? 'manual entry' : rel.dateFrom ? `TMDB, from the ${esc(countryName(rel.dateFrom))} listing (no India date yet)` : 'TMDB'}${rel.sourceUrl ? ` · <a href="${esc(rel.sourceUrl)}" target="_blank" rel="noopener noreferrer">source</a>` : ''}${rel.conflict ? ` · TMDB says ${esc(D.fmtDate(rel.conflict))}` : ''}</span>` : '';
+    ? `<span class="muted small">Date source: ${rel.source === 'Manual' ? 'manual entry'
+      : rel.source === 'Streaming Availability' ? 'Streaming Availability (India listing)'
+        : rel.source === 'Watchmode' ? 'Watchmode (US release date; no India date yet)'
+          : rel.dateFrom ? `TMDB, from the ${esc(countryName(rel.dateFrom))} listing (no India date yet)` : 'TMDB'}${rel.sourceUrl ? ` · <a href="${esc(rel.sourceUrl)}" target="_blank" rel="noopener noreferrer">source</a>` : ''}${rel.conflict ? ` · TMDB says ${esc(D.fmtDate(rel.conflict))}` : ''}</span>` : '';
   const backdrop = img(t.backdrop, 'w780');
 
   const body = `<article class="detail">
@@ -549,6 +555,7 @@ async function renderTitle(type, id) {
       <div class="btnrow">
         <button class="btn ${saved ? 'btn-ghost on' : 'btn-primary'}" data-action="toggle-watch" data-key="${esc(key)}" aria-pressed="${saved}">${icon.bookmarkSm}${saved ? 'In watchlist' : 'Add to watchlist'}</button>
         ${date ? `<button class="btn btn-ghost" data-action="export-one">${icon.calAdd}Add to calendar</button>` : ''}
+        ${rel?.link && /^https:\/\//.test(rel.link) ? `<a class="btn btn-ghost" href="${esc(rel.link)}" target="_blank" rel="noopener noreferrer">Open in ${esc(pName(rel.platforms[0]))} ${icon.ext}</a>` : ''}
         ${t.link ? `<a class="btn btn-ghost" href="${esc(t.link)}" target="_blank" rel="noopener noreferrer">Where to watch ${icon.ext}</a>` : ''}
       </div>
       ${dLangs.length ? `<section class="dsec"><h2 class="label">Languages</h2><div class="wrap">${dLangs.map((l, i) => `<span class="pill static">${esc(langName(l))}${i === 0 && l === t.lang ? ' (original)' : ''}</span>`).join('')}</div>
@@ -663,7 +670,25 @@ async function checkReminders() {
 }
 
 // ---------------------------------------------------------------- settings
+function syncText() {
+  const s = state.syncStatus;
+  if (!s) return '<p class="small muted">Extra sources: checking…</p>';
+  const names = { motn_upcoming: 'Streaming Availability · upcoming', motn_new: 'Streaming Availability · new', watchmode: 'Watchmode' };
+  const keys = `Keys on the server: Streaming Availability ${s.sources?.motn ? '✓' : '✗'} · Watchmode ${s.sources?.watchmode ? '✓' : '✗'}`;
+  if (!s.last) return `<p class="small muted">${keys}<br>Extra sources haven't synced yet. They sync daily at 06:00 IST.</p>`;
+  const when = new Date(s.last.at).toLocaleString('en-IN', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+  const lines = Object.entries(s.last.sources || {}).map(([k, v]) => `${esc(names[k] || k)}: ${v.ok ? `${v.rows} titles` : `failed (${esc(v.error)})`}`);
+  return `<p class="small muted">${keys}<br>Last sync ${esc(when)}${lines.length ? `<br>${lines.join('<br>')}` : ''}</p>`;
+}
+async function loadSyncStatus() {
+  try { state.syncStatus = await (await fetch('/api/sync')).json(); } catch { state.syncStatus = { last: null }; }
+}
+
 function renderSettings() {
+  if (S.getAdminToken() && !state.syncStatus && !state.loadingSync) {
+    state.loadingSync = true;
+    loadSyncStatus().then(() => { state.loadingSync = false; if (location.hash.startsWith('#/settings')) rerender(); });
+  }
   const my = myPlatforms();
   const myL = myLanguages();
   if (state.tmdb && !state.providers && !state.authError && !state.loadingLogos) {
@@ -728,7 +753,8 @@ function renderSettings() {
     <section class="panel">
       <div class="panel-head"><h2>Owner tools</h2>${admin ? '<span class="status ok">Unlocked</span>' : ''}</div>
       <p class="small muted">Only the site owner has the admin token. It lets you add release dates TMDB doesn't have yet. Everyone else can ignore this.</p>
-      ${admin ? `<div class="btnrow"><a class="btn btn-primary grow" href="#/admin">Add a release manually</a><button class="btn btn-ghost" data-action="remove-admin">Lock</button></div>`
+      ${admin ? `<div class="btnrow"><a class="btn btn-primary grow" href="#/admin">Add a release manually</a><button class="btn btn-ghost" data-action="remove-admin">Lock</button></div>
+      <div class="sync">${syncText()}<button class="btn btn-ghost small" data-action="sync-now" ${state.syncing ? 'disabled' : ''}>${state.syncing ? 'Syncing…' : 'Sync extra sources now'}</button></div>`
     : `<form class="row-form" data-form="admin-token" autocomplete="off"><label class="field grow"><span>Admin token</span><input name="admin" type="password" required minlength="8" maxlength="200"></label><button class="btn btn-ghost" type="submit">Unlock</button></form>`}
     </section>
     <p class="attribution small muted">Data from <a href="https://www.themoviedb.org/" target="_blank" rel="noopener noreferrer">TMDB</a>. This product uses the TMDB API but is not endorsed or certified by TMDB. Streaming availability data is provided by JustWatch through TMDB.</p>`;
@@ -1001,6 +1027,21 @@ const actions = {
     initTmdb();
     resetData();
     toast('Token removed from this device');
+    rerender();
+  },
+  'sync-now': async () => {
+    state.syncing = true;
+    rerender();
+    try {
+      const r = await adminFetch('/api/sync', { method: 'POST' });
+      state.syncStatus = { ...(state.syncStatus || {}), last: r };
+      S.cacheRemovePrefix('ext:');
+      state.months.clear();
+      toast('Extra sources synced');
+    } catch (e) {
+      toast(e.message);
+    }
+    state.syncing = false;
     rerender();
   },
   'remove-admin': () => { S.clearAdminToken(); rerender(); },

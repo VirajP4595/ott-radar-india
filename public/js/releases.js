@@ -2,7 +2,7 @@
 // owner's manual entries from /api/manual.
 import { cacheGet, cacheSet, cacheRemovePrefix } from './store.js';
 import { pool } from './tmdb.js';
-import { PLATFORMS, keyForText, keysInText, idsForKeys } from './platforms.js';
+import { PLATFORMS, keyForText, keysInText, idsForKeys, platformByKey } from './platforms.js';
 import * as D from './dates.js';
 import { langsInText, uniq } from './ui.js';
 
@@ -287,8 +287,123 @@ export async function fetchManual(from, to) {
 }
 export const clearManualCache = () => cacheRemovePrefix('man:');
 
+// ---------- Extra sources synced daily on the server (Movie of the Night India, Watchmode)
+const splitLangs = (s) => String(s || '').split(',').filter((x) => /^[a-z]{2}$/.test(x));
+function extToRelease(row) {
+  const motn = row.source === 'motn';
+  const tv = row.media_type === 'tv';
+  return {
+    id: `ext:${row.source}:${row.media_type}:${row.tmdb_id}:${row.date}`,
+    key: `${row.media_type}:${row.tmdb_id}`, mediaType: tv ? 'tv' : 'movie', tmdbId: row.tmdb_id,
+    title: row.title || 'Untitled', lang: '', langs: splitLangs(row.languages), date: row.date,
+    platforms: [row.platform], kind: tv ? 'series' : 'movie',
+    label: tv ? `New on ${platformByKey(row.platform)?.name || 'streaming'}` : '',
+    poster: '', posterUrl: row.poster_url || '', runtime: 0, genres: [],
+    status: motn ? 'Confirmed' : 'Likely', source: motn ? 'Streaming Availability' : 'Watchmode',
+    dateFrom: motn ? '' : 'US', link: row.link || '', ext: true, rank: 500,
+  };
+}
+
+export async function fetchExternal(from, to) {
+  const ck = `ext:${from}:${to}`;
+  const c = cacheGet(ck);
+  if (c) return c;
+  try {
+    const res = await fetch(`/api/external?from=${from}&to=${to}`, { headers: { accept: 'application/json' } });
+    if (!res.ok) return [];
+    const list = ((await res.json()).entries || []).map(extToRelease);
+    cacheSet(ck, list, 30 * 60e3);
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Fold the extra sources into the TMDB list, without duplicates:
+ *  1. Extra-source rows for one title collapse first. Movie of the Night (India) replaces Watchmode (US);
+ *     rows for the same title and day become one entry listing every service.
+ *  2. Against TMDB:
+ *     - TMDB India date with a known service, same day  -> one entry; services and audio languages are combined.
+ *     - same service on a different day                  -> TMDB's India date is kept (a disagreement, not a new release).
+ *     - a different service on a different day            -> a separate release (e.g. Prime first, Netflix later).
+ *     - TMDB had only "Platform TBA" or a borrowed date   -> replaced by the extra source.
+ *     - TMDB doesn't have the title in this range         -> the extra source adds it.
+ */
+function mergeExternal(tmdbList, ext) {
+  const grouped = new Map();
+  for (const e of ext) {
+    if (!grouped.has(e.key)) grouped.set(e.key, []);
+    grouped.get(e.key).push(e);
+  }
+  const collapsed = [];
+  for (const rows of grouped.values()) {
+    const india = rows.filter((r) => r.source !== 'Watchmode');
+    const byDay = new Map();
+    for (const r of india.length ? india : rows) {
+      const cur = byDay.get(r.date);
+      if (!cur) { byDay.set(r.date, { ...r, platforms: [...r.platforms], langs: [...r.langs] }); continue; }
+      cur.platforms = uniq([...cur.platforms, ...r.platforms]);
+      cur.langs = uniq([...cur.langs, ...r.langs]);
+      cur.link = cur.link || r.link;
+      cur.posterUrl = cur.posterUrl || r.posterUrl;
+    }
+    collapsed.push(...byDay.values());
+  }
+
+  const byKey = new Map();
+  for (const r of tmdbList) {
+    if (!byKey.has(r.key)) byKey.set(r.key, []);
+    byKey.get(r.key).push(r);
+  }
+  const fromRef = (e, ref, platforms = e.platforms) => ({
+    ...e, platforms, lang: ref.lang, langs: uniq([ref.lang, ...(ref.langs || []), ...e.langs]), poster: ref.poster,
+    genres: ref.genres, runtime: ref.runtime, rank: ref.rank, enriched: true,
+  });
+  const drop = new Set();
+  const add = [];
+  for (const e of collapsed) {
+    const t = byKey.get(e.key) || [];
+    const strong = t.filter((x) => x.status === 'Confirmed' && !x.platforms.includes('unknown'));
+    if (strong.length) {
+      const same = strong.find((x) => x.date === e.date);
+      if (same) {
+        same.platforms = uniq([...same.platforms, ...e.platforms]);
+        same.langs = uniq([...(same.langs || []), ...e.langs]);
+        same.link = same.link || e.link;
+        continue;
+      }
+      strong.forEach((x) => { x.langs = uniq([...(x.langs || []), ...e.langs]); });
+      const otherServices = e.platforms.filter((p) => !strong.some((x) => x.platforms.includes(p)));
+      if (e.source !== 'Watchmode' && otherServices.length) add.push(fromRef(e, strong[0], otherServices));
+      continue;
+    }
+    if (e.source === 'Watchmode' && t.some((x) => x.status === 'Likely')) continue;
+    const ref = t[0];
+    if (ref) {
+      t.forEach((x) => drop.add(x));
+      add.push(fromRef(e, ref));
+    } else add.push({ ...e });
+  }
+  return [...tmdbList.filter((x) => !drop.has(x)), ...add];
+}
+
+/** Titles that came only from an extra source get poster, language and genres from TMDB. */
+export async function enrichExternal(tmdb, list) {
+  const todo = list.filter((r) => r.ext && !r.enriched && r.tmdbId);
+  await pool(todo, 4, async (r) => {
+    const info = r.mediaType === 'movie' ? await movieInfo(tmdb, r.tmdbId) : await tvInfo(tmdb, r.tmdbId);
+    Object.assign(r, {
+      poster: info.poster || '', lang: info.lang, langs: uniq([info.lang, ...(info.langs || []), ...r.langs]),
+      genres: info.genres || [], runtime: info.runtime || 0, enriched: true,
+    });
+  }).catch(() => {});
+  return list;
+}
+
 /** Manual entries win over TMDB. A different TMDB date is kept as `conflict` so the UI can flag it. */
-export function mergeReleases(tmdbList, manual) {
+export function mergeReleases(tmdbList0, manual, ext = []) {
+  const tmdbList = mergeExternal(tmdbList0, ext);
   const byKey = new Map();
   for (const r of tmdbList) {
     if (!byKey.has(r.key)) byKey.set(r.key, []);
@@ -331,14 +446,15 @@ export function applyFilters(list, f, watchKeys = new Set(), myPlatforms = [], m
   return list.filter((r) => {
     // A title matches a language if it is in ANY of its known languages
     // (original, spoken, named in the India release note, or ticked on a manual entry).
-    const langs = r.langs && r.langs.length ? r.langs : [r.lang];
+    // Unknown language (an extra-source title not yet matched on TMDB) never hides a release.
+    const langs = r.langs && r.langs.length ? r.langs : r.lang ? [r.lang] : [];
     const unknown = r.platforms.includes('unknown');
     if (unknown && f.showUnknown === false) return false;
     if (myPlatforms.length && !unknown && !r.platforms.some((p) => myPlatforms.includes(p))) return false;
-    if (myLanguages.length && !langs.some((l) => myLanguages.includes(l))) return false;
+    if (myLanguages.length && langs.length && !langs.some((l) => myLanguages.includes(l))) return false;
     if (f.mine && !watchKeys.has(r.key)) return false;
     if (f.platforms.length && !r.platforms.some((p) => f.platforms.includes(p))) return false;
-    if (f.languages.length && !langs.some((l) => f.languages.includes(l))) return false;
+    if (f.languages.length && langs.length && !langs.some((l) => f.languages.includes(l))) return false;
     if (f.confirmedOnly && r.status !== 'Confirmed') return false;
     switch (f.kind) {
       case 'premieres': return r.kind === 'series' || r.kind === 'season';

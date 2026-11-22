@@ -13,6 +13,24 @@ by **day, week and month**. It runs on Cloudflare Workers' free tier.
 - **Watchlist + reminders** saved on the device. No accounts.
 - **Works offline** for the data you've already loaded (6-hour device cache, service worker).
 
+## Extra sources (synced on the server)
+
+TMDB alone misses many India release dates, so a daily job on the Worker (06:00 IST, see
+`[triggers]` in `wrangler.toml`) also pulls:
+
+| Source | What it adds | Key (Worker secret) | Requests |
+|---|---|---|---|
+| Movie of the Night, Streaming Availability (India) | Titles **announced** for Netflix/Prime/JioHotstar/ZEE5/SonyLIV/Apple TV+ in India, titles **newly added**, and their **audio languages** (dubs) | `MOTN_API_KEY` | 14/day (free plan: 1,000/month) |
+| Watchmode (free plan, US data) | Release dates of streaming originals, used as a "Likely date" | `WATCHMODE_API_KEY` | 1/day |
+
+Results are cached in D1 (`ext_releases`) and served at `/api/external`, so visitors need no keys.
+The owner can run the sync on demand in **Settings → Owner tools → Sync extra sources now**.
+Each source is optional: without its secret it's skipped.
+
+Merge order: manual entries, then Movie of the Night (India), then TMDB's India date, then
+borrowed dates (TMDB and Watchmode). Duplicates are collapsed: one card per title per day, listing
+every service; a different service on a different day is a separate release.
+
 ## How the data works
 
 ```
@@ -56,7 +74,10 @@ One-time setup:
    **Console** and run the contents of `schema.sql`. Put its ID in `wrangler.toml` (`database_id`).
 2. **Owner password.** In the Worker, go to **Settings → Variables and Secrets → Add**, choose type
    **Secret**, name `ADMIN_TOKEN`, and use a long random value. Secrets survive later deploys.
-3. **Check it.** `https://<worker>.<subdomain>.workers.dev/api/manual?from=2026-11-01&to=2026-11-30`
+3. **Extra sources (optional).** Add the secrets `MOTN_API_KEY` (movieofthenight.com) and
+   `WATCHMODE_API_KEY` (watchmode.com) the same way. Then unlock Owner tools in the site's Settings
+   and press **Sync extra sources now** once; after that it runs daily.
+4. **Check it.** `https://<worker>.<subdomain>.workers.dev/api/manual?from=2026-11-01&to=2026-11-30`
    should return `{"entries":[]}`.
 
 **From your computer instead:**

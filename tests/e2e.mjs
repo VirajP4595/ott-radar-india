@@ -2,6 +2,7 @@
 // and replaces TMDB with a mock (so no TMDB token or network is needed).
 // Usage: npm test      (needs `npm install` and Playwright available)
 import { spawn, execSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -52,12 +53,17 @@ const MOVIES = {
   107: { title: 'Drishyam Test', lang: 'hi', dates: [[T, '']], prov: [], runtime: 148, pop: 8 },
   108: { title: 'Global Original', lang: 'en', dates: [], other: [[T, 'BR', 'Netflix'], [T, 'US', 'Netflix']], prov: [8] },
   109: { title: 'Tiny Short', lang: 'en', dates: [[T, '']], prov: [], runtime: 5, pop: 0.1 },
+  120: { title: 'Hindi Dub Film', lang: 'hi', dates: [], prov: [] },
+  121: { title: 'Dubbed Blockbuster', lang: 'ta', dates: [], prov: [] },
+  123: { title: 'Two Service Film', lang: 'hi', dates: [], prov: [] },
+  124: { title: 'Staggered Film', lang: 'te', dates: [], prov: [] },
   110: { title: 'Old Classic', lang: 'en', dates: [], other: [[T, 'PH', 'Netflix']], prov: [8], released: '1999-01-01' },
 };
 const SHOWS = {
   201: { name: 'Second Shift', lang: 'hi', prov: [2336], season: 2, eps: [[2, 1, T], [2, 2, addDays(T, 7)]] },
   202: { name: 'Weekly Show', lang: 'en', prov: [8], season: 1, eps: [[1, 1, addDays(T, -14)], [1, 2, addDays(T, -7)], [1, 3, T], [1, 4, addDays(T, 7)]] },
   203: { name: 'Brand New', lang: 'ta', prov: [237], season: 1, eps: [1, 2, 3, 4, 5, 6].map((e) => [1, e, addDays(T, -2)]) },
+  230: { name: 'US Only Show', lang: 'en', prov: [], season: 1, eps: [[1, 1, '2020-01-01']] },
   204: { name: 'Last Dance', lang: 'hi', prov: [119], season: 3, eps: [[3, 1, addDays(T, -14)], [3, 2, addDays(T, -7)], [3, 3, T, 'finale']] },
 };
 const provList = (ids) => ({ results: { IN: { link: 'https://www.themoviedb.org/movie/1/watch?locale=IN', flatrate: ids.map((id) => PROVIDERS.find((p) => p.provider_id === id)) } } });
@@ -124,6 +130,58 @@ function tmdb(url, headers) {
   return [404, { status_message: `mock: no route for ${p}` }];
 }
 
+// ---------- mock Movie of the Night + Watchmode (called by the Worker during /api/sync)
+const EXT_PORT = 8792;
+const istTs = (d) => Date.parse(`${d}T00:00:00+05:30`) / 1000;
+const THIS_YEAR = Number(T.slice(0, 4));
+const motnShow = (tmdbId, title, year, audios = [], svc = 'netflix') => ({
+  tmdbId, title, releaseYear: year, imageSet: { verticalPoster: { w240: 'https://cdn.movieofthenight.com/show/1/poster/240.jpg' } },
+  streamingOptions: { in: audios.length ? [{ service: { id: svc }, audios: audios.map((language) => ({ language })) }] : [] },
+});
+const sh = (id, tmdbId, title, year = THIS_YEAR, audios = [], svc = 'netflix') => [id, motnShow(tmdbId, title, year, audios, svc)];
+const MOTN_SHOWS = Object.fromEntries([
+  sh('a', 'movie/107', 'Drishyam Test'), sh('b', 'movie/120', 'Hindi Dub Film'), sh('e', 'movie/123', 'Two Service Film'),
+  sh('f', 'movie/101', 'Monsoon Ledger'), sh('g', 'movie/102', 'Neelam'), sh('k', 'movie/124', 'Staggered Film'),
+  sh('c', 'movie/121', 'Dubbed Blockbuster', THIS_YEAR, ['tam', 'hin'], 'hotstar'), sh('d', 'movie/122', 'Ancient Film', 1950),
+]);
+const ch = (showId, svc, day, link) => ({ showId, service: { id: svc }, timestamp: istTs(day), ...(link ? { link } : {}) });
+const MOTN_CHANGES = {
+  upcoming: [
+    ch('a', 'netflix', T, 'https://www.netflix.com/title/1'), // fills a "Platform TBA" title
+    ch('b', 'prime', addDays(T, 1)), // title TMDB doesn't have
+    ch('e', 'netflix', T), ch('e', 'prime', T), // same title, two services, same day -> one card
+    ch('f', 'prime', T), // TMDB says Netflix today -> one card with both
+    ch('g', 'prime', addDays(T, 5)), // TMDB says Prime today -> same service, other day: keep TMDB
+    ch('c', 'hotstar', addDays(T, -3)), // also in "new" below -> one row, the "new" date wins
+    ch('k', 'netflix', addDays(T, 2)), // Netflix later than Prime -> a second, separate release
+  ],
+  new: [ch('c', 'hotstar', addDays(T, -1)), ch('d', 'hotstar', addDays(T, -1)), ch('k', 'prime', addDays(T, -1))],
+};
+const CATALOG_SERVICE = { netflix: 'netflix', 'prime.subscription': 'prime', hotstar: 'hotstar', zee5: 'zee5', sonyliv: 'sonyliv', 'apple.subscription': 'apple' };
+const WATCHMODE = [
+  { title: 'Global Original', source_name: 'Netflix', source_release_date: T, tmdb_id: 108, tmdb_type: 'movie' },
+  { title: 'Global Original', source_name: 'Netflix', source_release_date: T, tmdb_id: 108, tmdb_type: 'movie' }, // duplicate row
+  { title: 'US Only Show', source_name: 'Prime Video', source_release_date: T, tmdb_id: 230, tmdb_type: 'tv' },
+];
+function startExtMock() {
+  return new Promise((ok) => {
+    const srv = createServer((req, res) => {
+      const u = new URL(req.url, 'http://x');
+      let body = { error: 'no route' };
+      if (req.headers['x-api-key'] !== 'test-key') body = { error: 'bad key' };
+      else if (u.pathname === '/motn/v4/changes') {
+        const svc = CATALOG_SERVICE[u.searchParams.get('catalogs')];
+        const changes = (MOTN_CHANGES[u.searchParams.get('change_type')] || []).filter((c) => c.service.id === svc);
+        body = { changes, shows: Object.fromEntries(changes.map((c) => [c.showId, MOTN_SHOWS[c.showId]])), hasMore: false };
+      }
+      else if (u.pathname === '/wm/v1/releases/') body = { releases: WATCHMODE };
+      res.writeHead(body.error ? 404 : 200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+    });
+    srv.listen(EXT_PORT, () => ok(srv));
+  });
+}
+
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
 
 // ---------- test harness
@@ -144,8 +202,12 @@ async function waitForServer() {
 async function main() {
   execSync('npx wrangler d1 execute ott-radar-india --local --file schema.sql', { cwd: ROOT, stdio: 'ignore' });
   execSync('npx wrangler d1 execute ott-radar-india --local --command "DELETE FROM manual"', { cwd: ROOT, stdio: 'ignore' });
-  const server = spawn('npx', ['wrangler', 'dev', '--port', String(PORT), '--var', `ADMIN_TOKEN:${ADMIN}`], { cwd: ROOT, stdio: 'ignore', detached: true });
-  const stop = () => { try { process.kill(-server.pid); } catch { /* gone */ } };
+  execSync('npx wrangler d1 execute ott-radar-india --local --command "DROP TABLE IF EXISTS ext_releases; DELETE FROM meta WHERE k = \'last_sync\'"', { cwd: ROOT, stdio: 'ignore' });
+  const extMock = await startExtMock();
+  const server = spawn('npx', ['wrangler', 'dev', '--port', String(PORT), '--var', `ADMIN_TOKEN:${ADMIN}`,
+    '--var', `MOTN_BASE:http://localhost:${EXT_PORT}/motn/v4`, '--var', 'MOTN_API_KEY:test-key',
+    '--var', `WATCHMODE_BASE:http://localhost:${EXT_PORT}/wm/v1`, '--var', 'WATCHMODE_API_KEY:test-key'], { cwd: ROOT, stdio: 'ignore', detached: true });
+  const stop = () => { try { process.kill(-server.pid); } catch { /* gone */ } extMock.close(); };
   process.on('exit', stop);
   try {
     await waitForServer();
@@ -229,6 +291,54 @@ async function main() {
     check(day.includes('Global Original') && day.includes('Likely date'), 'worldwide original with no India date uses the matching-service date from another country ("Likely date")');
     check(!day.includes('Tiny Short'), 'short films / test entries are not shown as Platform TBA');
     check(!day.includes('Old Classic'), "an old film added in just one other country isn't treated as a new India release");
+
+    console.log('Extra sources (Movie of the Night India + Watchmode, synced on the server)');
+    r = await fetch(`${BASE}/api/sync`, { method: 'POST' });
+    check(r.status === 401, 'running the sync needs the admin token');
+    r = await fetch(`${BASE}/api/sync`, { method: 'POST', headers: { authorization: `Bearer ${ADMIN}` } });
+    const sum = await r.json();
+    check(sum.sources?.motn_upcoming?.rows === 8 && sum.sources?.motn_new?.rows === 2 && sum.sources?.watchmode?.rows === 3 && sum.sources?.motn_upcoming?.requests === 6,
+      `sync stores upcoming + new (old catalogue filtered) + Watchmode rows [${JSON.stringify(sum.sources)}]`);
+    const ext = await (await fetch(`${BASE}/api/external?from=${addDays(T, -3)}&to=${addDays(T, 3)}`)).json();
+    check(ext.entries.length === 10, `rows are stored once per title + service (duplicates in a feed and across feeds collapse) (${ext.entries.length})`);
+    check(ext.entries.filter((e) => e.tmdb_id === 121).length === 1 && ext.entries.find((e) => e.tmdb_id === 121).date === addDays(T, -1), 'title in both "upcoming" and "new" keeps one row with the actual arrival date');
+    await page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('ottr:c:ext:')).forEach((k) => localStorage.removeItem(k)));
+    await page.reload();
+    await page.locator('a.card').first().waitFor();
+    let dayX = await page.locator('main').innerText();
+    check(/Drishyam Test[\s\S]*?Netflix/.test((await page.locator('a.card:has-text("Drishyam Test")').innerText())), '"Platform TBA" title gets its service from the India listing (Netflix)');
+    check(dayX.includes('US Only Show') && (await page.locator('a.card:has-text("US Only Show")').innerText()).includes('Likely date'), 'Watchmode-only title appears with a "Likely date"');
+    check((dayX.match(/Global Original/g) || []).length === 1, 'a title found by two sources appears once');
+    check(dayX.includes('Hindi Dub Film') && dayX.includes('Prime Video'), 'announced India arrival for tomorrow is listed');
+    await page.goto(`${BASE}/#/day/${addDays(T, -1)}`);
+    await page.locator('a.card:has-text("Dubbed Blockbuster")').waitFor({ timeout: 15000 });
+    const dub = await page.locator('a.card:has-text("Dubbed Blockbuster")').innerText();
+    check(dub.includes('Tamil') && dub.includes('Hindi') && dub.includes('JioHotstar'), 'newly added India title shows its audio languages (Tamil + Hindi dub)');
+    check(!(await page.locator('main').innerText()).includes('Ancient Film'), 'old catalogue additions are filtered out');
+    const cardsOn = async (d, title) => {
+      await page.goto(`${BASE}/#/day/${d}`);
+      await page.locator('main .sec').first().waitFor();
+      await page.waitForTimeout(300);
+      return page.locator('main .sec').first().locator(`a.card:has-text("${title}")`).allInnerTexts();
+    };
+    let cards = await cardsOn(T, 'Two Service Film');
+    check(cards.length === 1 && cards[0].includes('Netflix') && cards[0].includes('Prime Video'), 'same title on two services the same day → ONE card listing both');
+    cards = await cardsOn(T, 'Monsoon Ledger');
+    check(cards.length === 1 && cards[0].includes('Netflix') && cards[0].includes('Prime Video'), 'TMDB (Netflix) + India listing (Prime) on the same day → ONE card with both services');
+    cards = await cardsOn(T, 'Neelam');
+    const neelamLater = await cardsOn(addDays(T, 5), 'Neelam');
+    check(cards.length === 1 && neelamLater.length === 0, "same service on a different day doesn't create a second Neelam; TMDB's India date is kept");
+    const stagA = await cardsOn(addDays(T, -1), 'Staggered Film');
+    const stagB = await cardsOn(addDays(T, 2), 'Staggered Film');
+    check(stagA.length === 1 && stagA[0].includes('Prime Video') && !stagA[0].includes('Netflix') && stagB.length === 1 && stagB[0].includes('Netflix'),
+      'Prime first and Netflix later → two separate releases, each with its own service');
+    check((await cardsOn(addDays(T, -3), 'Dubbed Blockbuster')).length === 0 && (await cardsOn(addDays(T, -1), 'Dubbed Blockbuster')).length === 1, 'Dubbed Blockbuster appears once, on its arrival day');
+    cards = await cardsOn(T, 'Global Original');
+    check(cards.length === 1, 'a duplicate row in one source plus TMDB → still one card');
+    await page.goto(`${BASE}/#/title/movie/107`);
+    await page.locator('.dtitle').waitFor();
+    check((await page.locator('main').innerText()).includes('Streaming Availability (India listing)'), 'title page names the source of the date');
+    await page.goto(`${BASE}/#/day/${T}`);
 
     console.log('Quick platform chip');
     await page.click('.mobile-only button[data-key=netflix]');
